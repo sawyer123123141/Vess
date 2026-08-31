@@ -41,8 +41,8 @@ _FIXATIONS: tuple[tuple[float, float], ...] = (
 )
 _HOLD = (1.0, 3.0)
 
-# Pupils snap by default. `gaze_response` below 1.0 buys a time constant up to
-# this, which is how sad tracks reluctantly without becoming a separate mode.
+# Pupils snap by default. `gaze_lag` scales this time constant, which is how
+# sad tracks reluctantly without becoming a separate mode.
 _GAZE_TAU_MAX = 0.45
 _BREAK_CHECK = (1.5, 3.0)        # how often a reluctant tracker may look away
 _BREAK_LENGTH = (0.7, 1.4)
@@ -99,7 +99,7 @@ _LEAN_Y_DAMP = 0.55
 #   ease           face easing time constants -- below 1.0 is quicker
 #   bob            breath amplitude, and inversely its period
 #   track_bias     how far toward a person the gaze and the lean travel
-#   gaze_response  1.0 snaps; lower eases the pupils toward their target
+#   gaze_lag       0.0 snaps; higher eases the pupils toward their target
 #   gaze_y_bias    where the gaze rests, positive is downward (additive)
 #   track_break    chance of briefly looking away from a person
 _MOVEMENT_DEFAULTS: dict[str, float] = {
@@ -108,7 +108,7 @@ _MOVEMENT_DEFAULTS: dict[str, float] = {
     "ease": 1.0,
     "bob": 1.0,
     "track_bias": 1.0,
-    "gaze_response": 1.0,
+    "gaze_lag": 0.0,
     "gaze_y_bias": 0.0,
     "track_break": 0.0,
 }
@@ -123,7 +123,7 @@ _MOVEMENT_LIMITS: dict[str, tuple[float, float]] = {
     "ease": (0.3, 3.0),
     "bob": (0.0, 2.0),
     "track_bias": (0.25, 2.0),   # never 0: a face that ignores you reads broken
-    "gaze_response": (0.0, 1.0),
+    "gaze_lag": (0.0, 1.0),
     "gaze_y_bias": (-0.6, 0.6),
     "track_break": (0.0, 0.6),
 }
@@ -276,8 +276,8 @@ class FaceAnimator:
                       _clamp(self._fixation[1] * spread + rest[1], 1.0))
 
         # Snapping is the default, and the contrast with the easing face is the
-        # whole point. gaze_response below 1.0 is the one case that eases.
-        tau = _GAZE_TAU_MAX * (1.0 - move["gaze_response"])
+        # whole point. gaze_lag above 0.0 is the one case that eases.
+        tau = _GAZE_TAU_MAX * move["gaze_lag"]
         if tau <= 1e-4:
             self._gaze = target
         else:

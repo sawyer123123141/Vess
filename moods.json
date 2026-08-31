@@ -25,7 +25,7 @@
       "ease": 1.9,
       "bob": 0.7,
       "track_bias": 0.6,
-      "gaze_response": 0.35,
+      "gaze_lag": 0.65,
       "gaze_y_bias": 0.45,
       "track_break": 0.25
     }

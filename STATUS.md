@@ -11,8 +11,8 @@ physics, the multipliers are the character. A mood with no block moves exactly
 as neutral, so nothing that already existed had to change.
 
 Keys and limits: `hold` 0.25-3.0, `spread` 0.3-1.6, `ease` 0.3-3.0, `bob`
-0.0-2.0, `track_bias` 0.25-2.0, `gaze_response` 0.0-1.0, `gaze_y_bias`
--0.6-0.6, `track_break` 0.0-0.6. Multipliers default to 1.0, biases to 0.0.
+0.0-2.0, `track_bias` 0.25-2.0, `gaze_lag` 0.0-1.0, `gaze_y_bias` -0.6-0.6,
+`track_break` 0.0-0.6. Multipliers default to 1.0, lags and biases to 0.0.
 
 ### Measured, 180s idle per mood
 
@@ -65,20 +65,31 @@ broken rather than as sad.
   left pupil 5.6px, against ~1.7px before.
 - `tick()` 0.22 ms/frame, unchanged in practice.
 
-### PLAN.md
+### PLAN.md — and a correction
 
-Three additions, all in `## Rendering`:
+This clone was three commits behind `origin/main`. The remote already had a
+`PLAN.md` revision carrying the asymmetric geometry **and** an `Eye movement`
+section — I reported that neither existed, having checked only the local
+`git log` without fetching. They did exist. Merged now, resolved toward the
+remote: its Face design and Eye movement sections are the owner's own text
+and say more than mine did.
 
-- `### Face design` now carries the asymmetric geometry, the no-mirroring
-  rule, and that the asymmetry is fixed.
-- New `### Movement` section: pupils snap, face eases, the state table, the
-  bob, and now the mood-multiplier table with its two rules.
-- A **future** note under Movement: with several people in frame, gaze should
-  target whoever is speaking, not the nearest or largest bbox. Recorded as a
-  dependency so step 2 does not design person tracking around a single
-  subject. Worth knowing: it needs direction-of-arrival from a mic array, and
-  the hardware list in `PLAN.md` is a single USB mic — so it is not buildable
-  at all until that changes.
+My additions are folded in under `### Eye movement` as three subsections:
+whole-face movement, mood changes how it moves, and a **future** note that
+with several people in frame gaze should target whoever is speaking. That
+note also records the `pick_subject(detections)` rule for step 2, and that
+direction-of-arrival needs a mic array the hardware list does not have.
+
+### Two rules from the merged plan the code does not yet follow
+
+- **"Nothing moves randomly."** Idle fixation choice and every hold duration
+  come from `random.Random`. The plan wants each movement traceable to
+  something in `State`, and idle gaze to "drift toward the last thing that was
+  interesting" — which needs the world model that does not exist yet. Blink
+  irregularity is explicitly sanctioned, so that use of the RNG is fine.
+- **`speaking` has no glance behaviour.** The plan asks for mostly-on-person
+  with occasional looks away, because unbroken eye contact is unsettling.
+  `state.speaking` is currently unread by the animator.
 
 ## Whole-face movement
 
@@ -248,11 +259,10 @@ Keys in the preview window:
   gaze, and face drift. The clean split is the two movement systems into
   `output/motion.py`, leaving the animator to orchestrate. That is a new
   module and therefore the owner's call, so it has not been done.
-- **`gaze_response` reads backwards to some eyes.** 1.0 means instant and
-  lower means slower, which fits "missing keys default to 1.0" but inverts
-  the usual sense of a multiplier. The mapping is tau = 0.45 * (1 - value).
-  Renaming it `gaze_lag` with a 0.0 default would read more naturally at the
-  cost of breaking the uniform default.
+- **The detector must not assume one person.** `PLAN.md` now says the
+  subject comes from `pick_subject(detections)` and that nothing upstream of
+  it may collapse the candidates. Step 2 has to honour that even though the
+  picker's body is one line today.
 
 - **Pupil travel is small in real pixels.** Gaze is -1..1, but that maps to a
   reach of only 2.8px in the left eye and 1.8px in the right, so a full
