@@ -131,6 +131,94 @@ The eye *shape* morphs for mood:
 Pupils track `state.person_pos` from the detector. Tracking is the single
 biggest "it's alive" signal. Irregular blinking is second.
 
+### Movement
+
+Two motion systems, at different scales and speeds. The contrast between them
+is what reads as a creature rather than a widget.
+
+**Pupils snap.** Inside their eyes they jump to a fixation point, hold 1-3s,
+jump again — never interpolated between points. A micro-drift rides on top so
+they are never perfectly still.
+
+**The face eases.** The whole eye pair drifts around the canvas, a few pixels
+from centre, always smoothly interpolated and never near the edges. Floating,
+not sliding.
+
+The two compound. Leaning toward a person and pointing the pupils at them
+happen at once.
+
+Face position is driven by state, never by randomness:
+
+| state             | the face                              |
+|-------------------|---------------------------------------|
+| tracking a person | leans slightly toward them            |
+| thinking          | drifts up and away                    |
+| listening         | settles, leans in slightly            |
+| idle              | very slow wander between nearby points |
+
+A slow vertical bob of a pixel or two runs underneath all of it, like
+breathing.
+
+**Mood changes how it moves, not only how it looks.** Runtime state
+(thinking, listening, tracking, idle) picks *where* the face goes; mood scales
+*how* it gets there. Without this the motion reads the same in every mood.
+
+Each entry in `moods.json` may carry an optional `movement` block of
+multipliers against the constants in `animator.py`. The constants are the
+physics; the multipliers are the character. Every key is optional, missing
+keys take the default, and a mood with no block at all moves exactly as
+neutral — so adding a mood stays a matter of editing one JSON file.
+
+| key             | default | meaning                                          |
+|-----------------|---------|--------------------------------------------------|
+| `hold`          | 1.0     | length of pupil and face holds; below 1 is twitchier |
+| `spread`        | 1.0     | how far fixations and face wander reach from centre |
+| `ease`          | 1.0     | face easing time constants; below 1 is quicker    |
+| `bob`           | 1.0     | breath amplitude, and inversely its period        |
+| `track_bias`    | 1.0     | how far toward a person the gaze and lean travel  |
+| `gaze_response` | 1.0     | 1.0 snaps; lower eases the pupils to their target |
+| `gaze_y_bias`   | 0.0     | where gaze rests, positive downward (additive)    |
+| `track_break`   | 0.0     | chance of briefly looking away from a person      |
+
+The intent per mood:
+
+- **neutral** — the baseline everything else is relative to
+- **annoyed** — less movement overall, faster snaps, shorter holds. Tense
+- **sad** — slower easing, longer holds, gaze rests downward, less inclined
+  to track
+- **curious** — more movement, shorter holds, wider fixation spread, tracks
+  eagerly
+- **happy** — livelier bob, quicker easing, slightly shorter holds
+
+Two rules this layer must respect:
+
+- **Multipliers interpolate through a mood transition**, alongside the shape
+  and the colour. If the timing snapped while the shape morphed it would read
+  as a glitch.
+- **Values are clamped on the way in.** A bad number in a hand-edited file
+  must not be able to produce a face that vibrates or freezes, and
+  `track_bias` never reaches zero — a face that ignores you reads as broken,
+  not as sad.
+
+Sad is the one mood whose pupils do not purely snap. It tracks reluctantly
+rather than refusing to: the gaze eases toward a person instead of jumping,
+lands short of them along the line back toward its own resting point, and
+occasionally breaks off to that rest for a beat before looking back. Same
+tracking code, different multipliers — not a separate mode.
+
+**Future — more than one person.** With several people in frame, gaze should
+target whoever is *speaking*, not the nearest or the largest bbox. That needs
+speaker identification the perception layer does not have: likely
+direction-of-arrival from a mic array, cross-referenced against detector
+bboxes. (The hardware list is currently a single USB mic, so this needs an
+array before it is buildable at all.)
+
+Recorded here as a dependency, not as a task. `camera.py` and `detector.py`
+must not design person tracking around a single subject. `state.person_pos`
+staying one point is fine — but whatever produces it has to be able to choose
+between candidates later, rather than collapsing them before the choice
+exists.
+
 ### Animator
 
 Owns time, separate from state:
@@ -141,6 +229,7 @@ class FaceAnimator:
     target: dict    # from state.mood
     blink_phase: float
     next_blink: float
+    face_offset: tuple[float, float]   # whole-face drift, eased
 
     def tick(self, state, dt) -> np.ndarray
 ```

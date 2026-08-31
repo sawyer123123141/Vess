@@ -131,18 +131,20 @@ def _coverage(distance: np.ndarray) -> np.ndarray:
 
 
 def _eye(side: str, shape: dict[str, float], openness: float,
-         gaze: tuple[float, float]) -> np.ndarray:
+         gaze: tuple[float, float], offset: tuple[float, float]) -> np.ndarray:
     def p(key: str) -> float:
         return shape[f"{side}_{key}"]
 
     half_w = p("w") / 2.0
     half_h = max(p("h") * openness, _MIN_EYE_H) / 2.0
 
-    px = _XX - p("cx")
+    # `offset` shifts the whole pair together, so it moves the eye without
+    # touching the relationship between the two.
+    px = _XX - (p("cx") + offset[0])
     # The slant ramps from zero at the outer edge to its full value at the
     # inner edge, tilting the eye the way a brow does.
     tilt = p("slant") * _INNER[side] * (px / half_w)
-    py = _YY - p("cy") - tilt
+    py = _YY - (p("cy") + offset[1]) - tilt
 
     cover = _coverage(_rounded_box(px, py, half_w, half_h, p("radius")))
 
@@ -170,17 +172,21 @@ def _eye(side: str, shape: dict[str, float], openness: float,
 
 
 def render(shape: dict[str, float], color: tuple[float, float, float],
-           brightness: float, openness: float,
-           gaze: tuple[float, float]) -> np.ndarray:
+           brightness: float, openness: float, gaze: tuple[float, float],
+           offset: tuple[float, float] = (0.0, 0.0)) -> np.ndarray:
     """Draw one frame.
 
     `openness` is 1 for open and 0 for shut. `gaze` is -1..1 in each axis,
     where +x is the viewer's right and +y is down. Each pupil travels as far
     as its own eye allows, so the smaller eye moves less.
+
+    `offset` moves the whole pair in panel pixels. It is a float on purpose --
+    a sub-pixel shift renders as a shift in edge brightness, which is what
+    makes a one-pixel drift look like drifting rather than jumping.
     """
     cover = np.maximum(
-        _eye("l", shape, openness, gaze),
-        _eye("r", shape, openness, gaze),
+        _eye("l", shape, openness, gaze, offset),
+        _eye("r", shape, openness, gaze, offset),
     )
     rgb = np.asarray(color, dtype=np.float32) * float(np.clip(brightness, 0.0, 1.0))
     frame = cover[:, :, None] * rgb

@@ -45,6 +45,8 @@ def main() -> None:
     for index, name in enumerate(mood_names, start=1):
         print(f"  {index}  mood -> {name}")
     print("  t  cycle a fake person_pos")
+    print("  k  toggle thinking   (face drifts up and away)")
+    print("  l  toggle listening  (face settles and leans in)")
     print("  q  quit")
 
     fake = 0
@@ -74,6 +76,14 @@ def main() -> None:
                     state.person_pos = position
                     state.person_present = position is not None
                 print(f"person_pos -> {position}")
+            elif key in (ord("k"), ord("l")):
+                # The face reacts to thinking and listening, and nothing sets
+                # either yet, so they need a key to be visible at all.
+                field = "thinking" if key == ord("k") else "listening"
+                with state.locked():
+                    value = not getattr(state, field)
+                    setattr(state, field, value)
+                print(f"{field} -> {value}")
 
             time.sleep(max(0.0, FRAME_TIME - (time.perf_counter() - now)))
     finally:
