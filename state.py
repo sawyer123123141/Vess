@@ -20,7 +20,7 @@ class State:
     mood_until: float = 0.0         # epoch; decays to neutral past this
 
     # appearance
-    color: tuple[int, int, int] = (100, 180, 255)
+    color: tuple[int, int, int] | None = None
     brightness: float = 0.7
 
     # perception

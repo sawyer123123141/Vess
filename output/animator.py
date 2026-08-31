@@ -176,6 +176,7 @@ class FaceAnimator:
         with state.locked():
             mood = state.mood
             mood_until = state.mood_until
+            color_override = state.color
             brightness = state.brightness
             person_pos = state.person_pos
             thinking = state.thinking
@@ -187,6 +188,9 @@ class FaceAnimator:
         entry = self._mood_entry(mood)
         self._blink_rate = float(entry.get("blink_rate", 1.0)) or 1.0
         self.target = self._target_for(mood)
+        if color_override is not None:
+            for channel, value in zip("rgb", color_override):
+                self.target[f"color_{channel}"] = float(value)
 
         alpha = 1.0 - math.exp(-dt / _MOOD_TAU)
         for key, value in self.target.items():

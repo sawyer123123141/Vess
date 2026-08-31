@@ -2,6 +2,43 @@
 
 Update this at the end of every session. Newest at the top.
 
+## Step 3 done — browser config UI with a live native preview
+
+`control/web.py` adds the local browser target. It joins the existing
+`Display` fan-out, so every 64x64 render can go to the browser, cv2, and later
+the LED panel at the same time. The browser target is enabled by default;
+set `display.cv2_enabled` to `true` for the existing cv2 fallback alongside
+it. The web server and browser launch run in their own threads, and
+`WebPreview.show()` only copies a frame under a lock — encoding and HTTP work
+never enter the 30fps render loop.
+
+### Browser UI
+
+- `http://127.0.0.1:8080/` shows the exact 64x64 RGB output, upscaled with
+  browser nearest-neighbour.
+- It polls lossless `/frame.png` at **30fps**, not a reduced preview rate.
+- The colour picker sends `PUT /color`; **Use mood colour** sends `DELETE
+  /color` to clear the override explicitly.
+
+`State.color` is now `None` by default, meaning use the active mood colour.
+An explicit RGB tuple overrides only colour, persists through mood changes,
+and uses the animator's existing 0.4s interpolation on both set and reset.
+Mood eye shape, blink rate, and movement continue unchanged.
+
+### Measured
+
+90 real `GET /frame.png` requests at the intended 30fps cadence completed in
+3.001s (**29.99fps**). The live face frame was **1,062 bytes** as PNG; mean
+localhost request latency was **0.842ms**, p95 **0.988ms**, max **1.065ms**.
+PNG polling has ample headroom, so no WebSocket transport is needed.
+
+### Verification
+
+`python -m unittest discover -s tests -v` passes all 8 tests, covering colour
+override/reset, lossless frame delivery, the 30fps UI contract, local server
+lifecycle, and browser-target fan-out. `python -m compileall -q control
+output perception main.py state.py` also exits cleanly.
+
 ## Step 2 done — eyes track a person from a real image
 
 `config.camera.source` is now `"image"` with `path` set to `"test.jpg"`, so
@@ -135,10 +172,9 @@ graceful degradation. If the detector is ever too slow the fix is lowering
 
 ## Next task
 
-**Step 3: `web.py`** — a localhost config UI with live face preview; changing
-the colour must be visible immediately. When the webcam arrives, separately
-switch `config.camera.source` back to `"camera"` and confirm mirror direction
-in its installed position.
+**Step 4: voice loop** — audio -> Whisper -> Ollama -> Kokoro. When the
+webcam arrives, separately switch `config.camera.source` back to `"camera"`
+and confirm mirror direction in its installed position.
 
 ## Mood drives movement
 

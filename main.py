@@ -9,8 +9,10 @@ from __future__ import annotations
 import json
 import threading
 import time
+import webbrowser
 from pathlib import Path
 
+from control.web import WebServer
 from output.animator import FaceAnimator
 from output.display import Display, PreviewWindow
 from perception import camera as camera_module
@@ -71,6 +73,27 @@ def _start_perception(config: dict, state: State,
     return thread, camera
 
 
+def _build_display(config: dict, state: State) -> tuple[Display, WebServer | None]:
+    """Build every enabled output target around the one rendered frame."""
+    display_config = config.get("display", {})
+    web_config = config.get("web", {})
+    targets = []
+    web_server = None
+
+    if web_config.get("enabled", True):
+        web_server = WebServer(state, int(web_config.get("port", 8080)))
+        targets.append(web_server.preview)
+    if display_config.get("cv2_enabled", False):
+        targets.append(PreviewWindow(scale=display_config.get("preview_scale", 8)))
+    if not targets:
+        raise RuntimeError("no display targets enabled")
+    return Display(targets), web_server
+
+
+def _open_browser(port: int) -> None:
+    webbrowser.open(f"http://127.0.0.1:{port}")
+
+
 def main() -> None:
     config = _load("config.json")
     moods = _load("moods.json")
@@ -78,10 +101,19 @@ def main() -> None:
 
     state = State()
     animator = FaceAnimator(moods)
-    display = Display([PreviewWindow(scale=config["display"]["preview_scale"])])
+    display, web_server = _build_display(config, state)
 
     stop = threading.Event()
     thread, camera = _start_perception(config, state, stop)
+    if web_server is not None:
+        web_server.start()
+        if config.get("web", {}).get("open_browser_on_start", True):
+            threading.Thread(
+                target=_open_browser,
+                args=(int(config["web"].get("port", 8080)),),
+                name="browser",
+                daemon=True,
+            ).start()
 
     print("keys:")
     for index, name in enumerate(mood_names, start=1):
@@ -134,6 +166,8 @@ def main() -> None:
             thread.join(timeout=2.0)
         if camera is not None:
             camera.close()
+        if web_server is not None:
+            web_server.close()
         display.close()
 
 

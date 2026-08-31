@@ -41,6 +41,7 @@
     "width": 64,
     "height": 64,
     "preview_scale": 8,
+    "cv2_enabled": false,
     "panel_enabled": false,
     "panel_host": ""
   },
@@ -58,6 +59,7 @@
     "vscode": ""
   },
   "web": {
+    "enabled": true,
     "port": 8080,
     "open_browser_on_start": true
   }
