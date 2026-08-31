@@ -99,17 +99,72 @@ testable without hardware.
 nearest-neighbour so the browser shows exactly what the panel will show,
 blocky edges included. An eye is ~12-16px across — shapes must be simple.
 
-### Face design
+### Face design — asymmetric eyes, no body, no mouth
 
-Rounded-rect eyes with pupils. The eye *shape* morphs for mood:
+Two eyes floating on black. Nothing else. No outline, no body, no mouth — the
+panel is 64x64 and a stroked body silhouette costs more pixels than it earns,
+while shrinking the eyes and killing expression range.
 
-- neutral — rounded rect
-- happy — squashed to an upward arc
-- annoyed — narrowed
-- sad — drooped, pupils low
+**The eyes are deliberately mismatched.** This is the character:
 
-Pupils track `state.person_pos` from the detector. Tracking is the single
-biggest "it's alive" signal. Irregular blinking is second.
+- left eye: larger, sits lower
+- right eye: smaller, sits a few pixels higher
+- both rounded rects with dark pupils cut out
+
+Approximate geometry at 64x64 (tune by eye, keep the asymmetry):
+
+```
+left  eye:  16w x 22h, rounded, top-left about (16, 26)
+right eye:  12w x 16h, rounded, top-left about (36, 23)
+left  pupil: r 4      right pupil: r 3
+```
+
+The mismatch is the point. It reads as a someone rather than a UI element, and
+it gives a distinctive resting face to deviate from — so widening or narrowing
+registers harder than it would from a symmetric baseline.
+
+**Mood morphs the eye shape**, interpolated by the animator:
+
+- neutral — as above
+- happy — both squash to upward arcs, pupils hidden
+- annoyed — both narrow vertically, pupils small
+- sad — tops droop, pupils sit low in the eye
+- curious — both widen, right eye rises further
+
+Optional later: two small solid marks above the eyes acting as brows. Solid
+shapes only, never strokes. Not in scope for step 1.
+
+### Eye movement
+
+**Nothing moves randomly.** Random motion reads as broken. Every movement
+traces to something in `State`. If there is no reason to move, drift toward
+the last thing that was interesting — do not jitter.
+
+Priority order for where the pupils point:
+
+1. **Tracking** — follow `state.person_pos` from the detector bbox. Strongest
+   aliveness signal available and it costs nothing extra.
+2. **State glances** —
+   - `thinking` — drift up and away, break contact
+   - `listening` — lock onto the person
+   - `speaking` — mostly on the person, with occasional brief looks away.
+     Unbroken eye contact is unsettling.
+   - idle — slow drift toward the most recently changed object in the world
+     model
+3. **Micro-drift** — small continuous motion even when locked. Perfect
+   stillness reads as frozen.
+
+**Pupils snap, they do not glide.** Real eyes move in saccades: fast jumps
+between fixation points with brief holds. Easing the pupil smoothly toward a
+target is the single most common mistake in digital eyes and it makes them
+look like a cursor. Move in 1-2 frames, then hold.
+
+Eye *shape* changes (mood morphs) do ease smoothly over ~0.4s. Only pupil
+position snaps.
+
+**Blinking**: irregular interval, roughly every 2-6s, with occasional double
+blinks. Blink rate scales with `mood.blink_rate`. Irregularity matters more
+than frequency — a metronome blink reads as mechanical.
 
 ### Animator
 
