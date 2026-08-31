@@ -89,8 +89,9 @@ class FaceAnimator:
         self._advance_blink(dt)
         gaze = self._advance_gaze(dt, person_pos)
 
-        color = (self.current["r"], self.current["g"], self.current["b"])
-        shape = {k: v for k, v in self.current.items() if k not in ("r", "g", "b")}
+        color = tuple(self.current[f"color_{c}"] for c in "rgb")
+        shape = {k: v for k, v in self.current.items()
+                 if not k.startswith("color_")}
         return face.render(shape, color, brightness, self._openness(), gaze)
 
     def _mood_entry(self, mood: str) -> dict:
@@ -104,8 +105,12 @@ class FaceAnimator:
     def _target_for(self, mood: str) -> dict[str, float]:
         entry = self._mood_entry(mood)
         params = face.shape_params(str(entry.get("eye", "normal")))
+        # Colour rides along in the same dict as the shape numbers so one
+        # easing loop handles both. Prefixed to stay clear of the right eye's
+        # own `r_` keys.
         color = entry.get("color", (255, 255, 255))
-        params["r"], params["g"], params["b"] = (float(c) for c in color)
+        for channel, value in zip("rgb", color):
+            params[f"color_{channel}"] = float(value)
         return params
 
     def _advance_blink(self, dt: float) -> None:

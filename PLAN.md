@@ -101,7 +101,27 @@ blocky edges included. An eye is ~12-16px across — shapes must be simple.
 
 ### Face design
 
-Rounded-rect eyes with pupils. The eye *shape* morphs for mood:
+Rounded-rect eyes with pupils. **The two eyes are not a mirrored pair** —
+they are different sizes at different heights, and the mismatch is the
+character's identity:
+
+| eye   | size  | top-left | pupil |
+|-------|-------|----------|-------|
+| left  | 16x22 | (16, 26) | r4    |
+| right | 12x16 | (36, 23) | r3    |
+
+The right eye is smaller in both dimensions *and* sits a few pixels higher.
+Neither eye is ever derived from the other by a transform — no mirroring, no
+slant flip. Every shape defines both eyes independently, so a morph may move
+them by different amounts (curious raises the right eye further than the
+left).
+
+The asymmetry is fixed. It never drifts, is never randomised, and does not
+breathe between two states. Mood morphs are the only thing that changes the
+relationship between the eyes, and they always resolve back to the same
+neutral baseline.
+
+The eye *shape* morphs for mood:
 
 - neutral — rounded rect
 - happy — squashed to an upward arc

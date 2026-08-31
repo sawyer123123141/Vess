@@ -8,6 +8,13 @@ Update this at the end of every session. Newest at the top.
 It blinks irregularly, wanders its gaze, and morphs between all five eye
 shapes in `moods.json`.
 
+**The two eyes are different.** Left is 16x22 with its top-left at (16, 26);
+right is 12x16 at (36, 23) — smaller in both dimensions and sitting 6px
+higher. Not a mirror, not a slant flip. Every shape in `EYE_SHAPES` defines
+both eyes independently and none derives one from the other, so a mood can
+move them by different amounts (`curious` raises the right eye 8px above the
+left, against 6px at neutral).
+
 Built: `state.py`, `output/face.py`, `output/animator.py`, `output/display.py`,
 `main.py`. 526 lines total, largest file 164.
 
@@ -35,11 +42,16 @@ Keys in the preview window:
 
 ### Design notes
 
-- **Eye shapes are a parameter vector, not five drawing routines.** All five
-  entries in `EYE_SHAPES` share the same keys (`w`, `h`, `radius`, `slant`,
-  `arc`, `pupil`, `pupil_r`, `pupil_y`), so a mood change is a componentwise
-  lerp. Colour rides along as `r`/`g`/`b` in the same dict, so one easing loop
-  handles shape and colour together.
+- **Eye shapes are a parameter vector, not ten drawing routines.** Every
+  shape carries the same ten keys per eye (`cx`, `cy`, `w`, `h`, `radius`,
+  `slant`, `arc`, `pupil`, `pupil_r`, `pupil_y`), flattened to `l_w`/`r_w` and
+  so on, so a mood change is one componentwise lerp across both eyes. Colour
+  rides along as `color_r`/`color_g`/`color_b` in the same dict — prefixed to
+  stay clear of the right eye's `r_` keys.
+- **The asymmetry is fixed.** It never drifts, is never randomised, and does
+  not breathe between two states. Neutral is the same face every run; only
+  mood morphs change the relationship between the eyes, and they always
+  resolve back to the same baseline.
 - **Easing is exponential**, tau 0.133 (~95% within the 0.4s the plan asks
   for), rather than a timed ramp. Retargeting mid-ease stays smooth instead of
   restarting.
@@ -51,6 +63,10 @@ Keys in the preview window:
 - **The pupil is a hole**, not a bright dot: eye body in the mood colour,
   pupil punched out to black. Highest contrast on an LED panel, and it shrinks
   to nothing as the lid closes so a blink ends on a solid line.
+- **Each pupil travels as far as its own eye allows** — reach is computed
+  from that eye's half-width and pupil radius, so the small right pupil moves
+  about 1.8px against the left's 2.8px for the same gaze value. Falls out of
+  the asymmetry rather than being tuned.
 - **Gaze is one code path.** Idle picks from seven fixed fixation points, snaps
   to one, holds 1-3s, snaps again. A sub-pixel drift from two sine waves with
   no common period rides on top, so the eyes are never perfectly still. When
@@ -73,8 +89,13 @@ Keys in the preview window:
   than pressing `q`. Every run that ended by clicking X exited code 1.
   `PreviewWindow.close()` swallows it.
 - Shearing the whole eye box for `slant` reads as a brow angle, but the first
-  values (2.5 and -3.0 px) turned a 7px-tall eye into a rotated sliver. 1.9
-  and -2.1 read the same at a glance and stay eye-shaped.
+  values (2.5 and -3.0 px) turned a 7px-tall eye into a rotated sliver. The
+  smaller right eye needs less slant than the left for the same read, which is
+  why `narrow` uses 2.2 and 1.8 rather than one value.
+- `PLAN.md` did not contain the eye geometry — the only face measurements in
+  it were "an eye is ~12-16px across" and "rounded-rect eyes with pupils".
+  The numbers came from the owner directly and are now written into the
+  Rendering section, so the authoritative file and the code agree.
 - The happy arc is a circle subtracted from below. Its radius controls
   curvature and has to be *smaller* than the eye is wide (0.62 × w) or the arch
   comes out nearly straight.
@@ -89,6 +110,10 @@ Keys in the preview window:
 - **`config.json` `display.width`/`height` are unread.** `face.py` has 64x64
   as constants because the plan says render natively. Either the config keys
   go, or `face.py` reads them. No urgency.
+- **The pair sits low and tight.** Together the eyes span x 16-48 (centred)
+  but y 23-48, which is ~3px below the panel's vertical centre, and the gap
+  between them is only 4px. That is what the given coordinates produce. Easy
+  to nudge if it reads wrong on the panel.
 - **Tracking is not mirrored.** A person at `person_pos.x = 0.1` makes the
   pupils go to the viewer's left. Whether that is correct depends on whether
   the camera image is mirrored — settle it against a real camera in step 2.
