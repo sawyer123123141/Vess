@@ -2,20 +2,63 @@
 
 Update this at the end of every session. Newest at the top.
 
-## Step 2 written — logic verified, model not
+## Step 2 done — eyes track a person from a real image
+
+`config.camera.source` is now `"image"` with `path` set to `"test.jpg"`, so
+the application can exercise perception without a webcam. `test.jpg` is
+Wikimedia Commons' *Example of person portrait.jpg* by Marin Bobek, used under
+[CC BY 3.0](https://creativecommons.org/licenses/by/3.0/).
+
+### End-to-end verification
+
+The configured `ImageSource` loaded and mirrored the photo, then downscaled it
+to **512x342**. Real CPU YOLO inference returned four `person` detections;
+`pick_subject` chose the largest and `write_state` set:
+
+| state value | result |
+|-------------|--------|
+| `person_present` | `true` |
+| `person_pos` | `(0.3778, 0.2507)` |
+| `objects` | `["person"]` |
+
+Feeding that exact state into `FaceAnimator` produced a pupil gaze of
+`(-0.244, -0.399)` and an initial whole-face lean of `(-0.032, -0.035)` px.
+The face is therefore following the real selected subject through the same
+state path the running detector thread uses.
+
+### CPU benchmark
+
+After one warm-up inference, ten calls to `Detector.detect()` at the configured
+512px maximum measured **24.2–36.8 ms/frame**, **27.1 ms mean** (25.6 ms
+median), or **36.92 fps**. The configured 3 fps means inference occupies about
+8.1% of each 333 ms detector interval, leaving the render loop independent in
+its own thread as designed.
+
+The webcam mirror-direction check remains a later hardware follow-up, not a
+blocker for this image-based completion of step 2.
+
+## YOLO weights downloaded and load verified
+
+`yolo11n.pt` (5,613,764 bytes) was downloaded from the Ultralytics GitHub
+release and loaded successfully with `ultralytics.YOLO`. It is located at
+`C:\Users\sawye\Vess\yolo11n.pt`; Ultralytics saved the relative model name in
+the repository working directory, rather than in the previously expected
+`C:\Users\sawye\weights` folder.
+
+This completes only the model-download prerequisite. `Detector.detect()` has
+not been run against an image or camera yet.
+
+## Step 2 implementation — before real-model verification
 
 `perception/camera.py` and `perception/detector.py` exist and are wired into
 `main.py`. The detector runs in its own thread; the render loop never waits on
 it. **Nothing here has been run against the real YOLO model or a real camera**,
 so step 2 is not done.
 
-### Blocked on two things
+### Historical blockers
 
-- **`yolo11n.pt` is NOT downloaded.** No YOLO weights are cached anywhere on
-  this machine — `C:\Users\sawye\weights` is where ultralytics would put it,
-  and it is empty. Constructing `Detector` triggers a ~5.4 MB fetch from the
-  ultralytics GitHub releases. That download was not authorised, so it has not
-  happened. Until it does, `Detector.detect()` has never executed.
+- **No room image or webcam.** The model is ready, but `Detector.detect()`
+  still needs a real frame before the detection path can be checked.
 - **No webcam.** On order. `config.camera.source` is `"camera"` and there is
   nothing at index 0, so `main.py` prints `perception off: no camera at index
   0` and carries on rendering. The `t` key still injects a fake `person_pos`,
@@ -92,24 +135,10 @@ graceful degradation. If the detector is ever too slow the fix is lowering
 
 ## Next task
 
-In order:
-
-1. **Approve the `yolo11n.pt` download** (~5.4 MB, ultralytics GitHub
-   releases, lands in `C:\Users\sawye\weights`). Nothing downstream can be
-   checked until the model can load.
-2. **Drop a photo of the room somewhere** and set `config.camera.source` to
-   `"image"` with `path` pointing at it. That makes the whole pipeline
-   verifiable with no camera: real detections, a subject picked, `person_pos`
-   written, and the face visibly tracking toward the person in the photo.
-3. **Benchmark `Detector.detect()` on the CPU** at 512px and record the
-   per-frame cost, so the 3fps in `config.json` is grounded in a number rather
-   than an assumption.
-4. **When the webcam arrives**, flip `config.camera.source` back to
-   `"camera"` and confirm the mirror direction is right in the room, with the
-   camera in its actual position.
-
-Only then is step 2 done. Step 3 is `web.py` — the config UI with a live
-preview.
+**Step 3: `web.py`** — a localhost config UI with live face preview; changing
+the colour must be visible immediately. When the webcam arrives, separately
+switch `config.camera.source` back to `"camera"` and confirm mirror direction
+in its installed position.
 
 ## Mood drives movement
 

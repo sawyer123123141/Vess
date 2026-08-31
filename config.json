@@ -26,9 +26,9 @@
     "sample_rate": 24000
   },
   "camera": {
-    "source": "camera",
+    "source": "image",
     "index": 0,
-    "path": "",
+    "path": "test.jpg",
     "mirror": true,
     "max_frame_px": 512
   },
