@@ -99,86 +99,117 @@ testable without hardware.
 nearest-neighbour so the browser shows exactly what the panel will show,
 blocky edges included. An eye is ~12-16px across — shapes must be simple.
 
-### Face design
+### Face design — asymmetric eyes, no body, no mouth
 
-Rounded-rect eyes with pupils. **The two eyes are not a mirrored pair** —
-they are different sizes at different heights, and the mismatch is the
-character's identity:
+Two eyes floating on black. Nothing else. No outline, no body, no mouth — the
+panel is 64x64 and a stroked body silhouette costs more pixels than it earns,
+while shrinking the eyes and killing expression range.
 
-| eye   | size  | top-left | pupil |
-|-------|-------|----------|-------|
-| left  | 16x22 | (16, 26) | r4    |
-| right | 12x16 | (36, 23) | r3    |
+**The eyes are deliberately mismatched.** This is the character:
 
-The right eye is smaller in both dimensions *and* sits a few pixels higher.
-Neither eye is ever derived from the other by a transform — no mirroring, no
-slant flip. Every shape defines both eyes independently, so a morph may move
-them by different amounts (curious raises the right eye further than the
-left).
+- left eye: larger, sits lower
+- right eye: smaller, sits a few pixels higher
+- both rounded rects with dark pupils cut out
 
-The asymmetry is fixed. It never drifts, is never randomised, and does not
-breathe between two states. Mood morphs are the only thing that changes the
-relationship between the eyes, and they always resolve back to the same
-neutral baseline.
+Approximate geometry at 64x64 (tune by eye, keep the asymmetry):
 
-The eye *shape* morphs for mood:
+```
+left  eye:  16w x 22h, rounded, top-left about (16, 26)
+right eye:  12w x 16h, rounded, top-left about (36, 23)
+left  pupil: r 4      right pupil: r 3
+```
 
-- neutral — rounded rect
-- happy — squashed to an upward arc
-- annoyed — narrowed
-- sad — drooped, pupils low
+The mismatch is the point. It reads as a someone rather than a UI element, and
+it gives a distinctive resting face to deviate from — so widening or narrowing
+registers harder than it would from a symmetric baseline.
 
-Pupils track `state.person_pos` from the detector. Tracking is the single
-biggest "it's alive" signal. Irregular blinking is second.
+**Mood morphs the eye shape**, interpolated by the animator:
 
-### Movement
+- neutral — as above
+- happy — both squash to upward arcs, pupils hidden
+- annoyed — both narrow vertically, pupils small
+- sad — tops droop, pupils sit low in the eye
+- curious — both widen, right eye rises further
 
-Two motion systems, at different scales and speeds. The contrast between them
-is what reads as a creature rather than a widget.
+Optional later: two small solid marks above the eyes acting as brows. Solid
+shapes only, never strokes. Not in scope for step 1.
 
-**Pupils snap.** Inside their eyes they jump to a fixation point, hold 1-3s,
-jump again — never interpolated between points. A micro-drift rides on top so
-they are never perfectly still.
+### Eye movement
 
-**The face eases.** The whole eye pair drifts around the canvas, a few pixels
-from centre, always smoothly interpolated and never near the edges. Floating,
-not sliding.
+**Nothing moves randomly.** Random motion reads as broken. Every movement
+traces to something in `State`. If there is no reason to move, drift toward
+the last thing that was interesting — do not jitter.
+
+Priority order for where the pupils point:
+
+1. **Tracking** — follow `state.person_pos` from the detector bbox. Strongest
+   aliveness signal available and it costs nothing extra.
+2. **State glances** —
+   - `thinking` — drift up and away, break contact
+   - `listening` — lock onto the person
+   - `speaking` — mostly on the person, with occasional brief looks away.
+     Unbroken eye contact is unsettling.
+   - idle — slow drift toward the most recently changed object in the world
+     model
+3. **Micro-drift** — small continuous motion even when locked. Perfect
+   stillness reads as frozen.
+
+**Pupils snap, they do not glide.** Real eyes move in saccades: fast jumps
+between fixation points with brief holds. Easing the pupil smoothly toward a
+target is the single most common mistake in digital eyes and it makes them
+look like a cursor. Move in 1-2 frames, then hold.
+
+Eye *shape* changes (mood morphs) do ease smoothly over ~0.4s. Only pupil
+position snaps.
+
+**Blinking**: irregular interval, roughly every 2-6s, with occasional double
+blinks. Blink rate scales with `mood.blink_rate`. Irregularity matters more
+than frequency — a metronome blink reads as mechanical.
+
+#### Whole-face movement
+
+The eye pair also drifts around the canvas, separately from the pupils moving
+inside the eyes. Both happen at once, at different scales and speeds.
+
+**The face eases where the pupils snap.** That contrast is what reads as a
+creature rather than a widget, so the two must not share a motion model. The
+face travels a few pixels from centre, always smoothly interpolated, never
+near the edges — floating, not sliding.
 
 The two compound. Leaning toward a person and pointing the pupils at them
 happen at once.
 
-Face position is driven by state, never by randomness:
-
-| state             | the face                              |
-|-------------------|---------------------------------------|
-| tracking a person | leans slightly toward them            |
-| thinking          | drifts up and away                    |
-| listening         | settles, leans in slightly            |
+| state             | the face                               |
+|-------------------|----------------------------------------|
+| tracking a person | leans slightly toward them             |
+| thinking          | drifts up and away                     |
+| listening         | settles, leans in slightly             |
 | idle              | very slow wander between nearby points |
 
 A slow vertical bob of a pixel or two runs underneath all of it, like
 breathing.
 
-**Mood changes how it moves, not only how it looks.** Runtime state
-(thinking, listening, tracking, idle) picks *where* the face goes; mood scales
-*how* it gets there. Without this the motion reads the same in every mood.
+#### Mood changes how it moves
+
+Runtime state picks *where* the face goes; mood scales *how* it gets there.
+Without this the motion reads the same in every mood.
 
 Each entry in `moods.json` may carry an optional `movement` block of
 multipliers against the constants in `animator.py`. The constants are the
-physics; the multipliers are the character. Every key is optional, missing
-keys take the default, and a mood with no block at all moves exactly as
-neutral — so adding a mood stays a matter of editing one JSON file.
+physics; the multipliers are the character. Every key is optional, and a mood
+with no block at all moves exactly as neutral — so adding a mood stays a
+matter of editing one JSON file.
 
-| key             | default | meaning                                          |
-|-----------------|---------|--------------------------------------------------|
+| key             | default | meaning                                              |
+|-----------------|---------|------------------------------------------------------|
 | `hold`          | 1.0     | length of pupil and face holds; below 1 is twitchier |
-| `spread`        | 1.0     | how far fixations and face wander reach from centre |
-| `ease`          | 1.0     | face easing time constants; below 1 is quicker    |
-| `bob`           | 1.0     | breath amplitude, and inversely its period        |
-| `track_bias`    | 1.0     | how far toward a person the gaze and lean travel  |
-| `gaze_response` | 1.0     | 1.0 snaps; lower eases the pupils to their target |
-| `gaze_y_bias`   | 0.0     | where gaze rests, positive downward (additive)    |
-| `track_break`   | 0.0     | chance of briefly looking away from a person      |
+| `spread`        | 1.0     | how far fixations and face wander reach from centre  |
+| `ease`          | 1.0     | face easing time constants; below 1 is quicker       |
+| `bob`           | 1.0     | breath amplitude, and inversely its period           |
+| `track_bias`    | 1.0     | how far toward a person the gaze and lean travel     |
+| `gaze_lag`      | 0.0     | 0 snaps; higher eases the pupils to their target     |
+| `gaze_y_bias`   | 0.0     | where gaze rests, positive downward (additive)       |
+| `track_break`   | 0.0     | chance of briefly looking away from a person         |
 
 The intent per mood:
 
@@ -200,24 +231,31 @@ Two rules this layer must respect:
   `track_bias` never reaches zero — a face that ignores you reads as broken,
   not as sad.
 
-Sad is the one mood whose pupils do not purely snap. It tracks reluctantly
-rather than refusing to: the gaze eases toward a person instead of jumping,
-lands short of them along the line back toward its own resting point, and
-occasionally breaks off to that rest for a beat before looking back. Same
-tracking code, different multipliers — not a separate mode.
+Sad is the one mood whose pupils do not purely snap, and the one exception to
+"pupils snap, they do not glide" above. It tracks reluctantly rather than
+refusing to: the gaze eases toward a person instead of jumping, lands short of
+them along the line back toward its own resting point, and occasionally breaks
+off to that rest for a beat before looking back. Same tracking code, different
+multipliers — not a separate mode.
 
-**Future — more than one person.** With several people in frame, gaze should
-target whoever is *speaking*, not the nearest or the largest bbox. That needs
-speaker identification the perception layer does not have: likely
-direction-of-arrival from a mic array, cross-referenced against detector
-bboxes. (The hardware list is currently a single USB mic, so this needs an
-array before it is buildable at all.)
+#### Future — more than one person
 
-Recorded here as a dependency, not as a task. `camera.py` and `detector.py`
-must not design person tracking around a single subject. `state.person_pos`
-staying one point is fine — but whatever produces it has to be able to choose
-between candidates later, rather than collapsing them before the choice
-exists.
+With several people in frame, gaze should target whoever is *speaking*, not
+the nearest or the largest bbox. That needs speaker identification the
+perception layer does not have: likely direction-of-arrival from a mic array,
+cross-referenced against detector bboxes. (The hardware list below is a single
+USB mic, so this needs an array before it is buildable at all.)
+
+Until then the subject is the largest bbox, chosen in one place —
+`pick_subject(detections)`. Everything that needs a subject calls it, so
+swapping in speaker identification is one function body changing rather than
+tracking logic scattered across the pipeline.
+
+Recorded as a dependency, not a task. `camera.py` and `detector.py` must not
+design person tracking around a single subject: the detector tracks every
+person it sees and the picker chooses between them. `state.person_pos` staying
+one point is fine — but nothing upstream of the picker may collapse the
+candidates before the choice exists.
 
 ### Animator
 
