@@ -448,6 +448,13 @@ Each step is a working thing. 1-7 need no hardware beyond a webcam.
 - USB webcam
 - USB mic (owned)
 
+**torch is CPU-only by design, and the GPU is for Ollama alone.** The YOLO
+detector is the cheap always-on tier and runs fine on the 5800X at the 3fps
+in `config.json`. Do not install a CUDA build of torch to speed it up: it
+would compete with `qwen2.5:7b` for the 8GB, and overflowing that drops
+throughput ~30x with no graceful degradation. If the detector is ever too
+slow, lower `detector.fps` or `camera.max_frame_px` instead.
+
 Panel gotchas: 64-tall panels use 5-address (ABCDE) multiplexing, which many
 drivers don't support. Some batches use the FM6126A driver chip and need to be
 told so explicitly.

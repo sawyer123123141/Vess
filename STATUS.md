@@ -2,6 +2,115 @@
 
 Update this at the end of every session. Newest at the top.
 
+## Step 2 written — logic verified, model not
+
+`perception/camera.py` and `perception/detector.py` exist and are wired into
+`main.py`. The detector runs in its own thread; the render loop never waits on
+it. **Nothing here has been run against the real YOLO model or a real camera**,
+so step 2 is not done.
+
+### Blocked on two things
+
+- **`yolo11n.pt` is NOT downloaded.** No YOLO weights are cached anywhere on
+  this machine — `C:\Users\sawye\weights` is where ultralytics would put it,
+  and it is empty. Constructing `Detector` triggers a ~5.4 MB fetch from the
+  ultralytics GitHub releases. That download was not authorised, so it has not
+  happened. Until it does, `Detector.detect()` has never executed.
+- **No webcam.** On order. `config.camera.source` is `"camera"` and there is
+  nothing at index 0, so `main.py` prints `perception off: no camera at index
+  0` and carries on rendering. The `t` key still injects a fake `person_pos`,
+  which is why it was kept rather than replaced.
+
+### What was built
+
+- **`camera.py`** — `FrameSource` with three implementations: `CameraSource`
+  (live, index from config), `ImageSource` (one still, returned forever) and
+  `VideoSource` (looped). Which one is used is `config.camera.source`, so
+  switching to the real camera when it arrives is one line of JSON.
+  `Camera` wraps a source and does the two per-frame jobs — mirror, then
+  downscale to `max_frame_px`.
+- **`detector.py`** — `Detection`, `pick_subject`, `Detector`, `write_state`,
+  `run_detection_loop`. The detector is pure: frames in, detections out, no
+  clock and no state. `write_state` folds one frame into `State`.
+- **`main.py`** — starts the detector thread if a source and a model can be
+  had, prints why not otherwise, and joins it on the way out.
+- **`config.json`** — new `camera` block (`source`, `index`, `path`, `mirror`,
+  `max_frame_px`), and `detector.confidence`.
+
+### Mirroring
+
+`camera.mirror` defaults to `true`. It is a horizontal flip of the frame in
+`Camera.read()`, not a coordinate flip further down, so exactly one thing
+decides which way round the room is. Moving to your left sends the eyes to
+your left, which is what a face on a wall should do.
+
+One consequence to remember: the tier 3 vision model will be handed the
+mirrored frame, so any text in the room reads backwards to it. Nothing depends
+on that yet. If it matters later, the fix is exposing the unflipped frame
+alongside rather than moving the flip.
+
+### Multiple people
+
+`pick_subject(detections)` is the only place a subject is chosen. Largest box
+for now. Everything that needs a subject calls it, so swapping in speaker
+identification later is one function body changing. Nothing upstream of it
+collapses the candidate list — the detector reports every person it sees and
+the picker decides. The rule is written into `PLAN.md` under Eye movement.
+
+### Verified without hardware or the model
+
+| check | result |
+|-------|--------|
+| `pick_subject` | chose the larger of two people, ignored a bigger chair |
+| gaze point | 0.365 down the box, against a 0.575 centre — head, not navel |
+| mirror | left-side block lands right when mirrored, not when off |
+| downscale | 1920x1080 -> 512x288 |
+| `open_camera` | refuses missing file / unknown kind / absent camera, with reasons |
+| video source | loops: frame means `[0, 77, 157, 0, 77, 157, 0]` |
+| absence grace | survives a dropped frame; `present_since` not restarted by a blip |
+| real absence | clears `person_present`, `person_pos`, `present_since` |
+| return after absence | starts a fresh `present_since` |
+| detection loop | 11 frames in 0.6s at 20fps, stopped cleanly on the event |
+
+### Two judgement calls
+
+- **Gaze targets 22% down the person's box**, not its centre. Box centre is
+  the torso and the face would appear to stare at your chest.
+- **Presence has a 1.5s grace period.** One dropped detection would otherwise
+  make the face look away and snap back. `present_since` survives a blip and
+  only restarts after a real absence.
+
+Both are constants in `detector.py` with the reasoning beside them.
+
+### Detector runs on the CPU, deliberately
+
+`torch` here is `2.13.0+cpu`, `cuda False`. That is now written into
+`PLAN.md`'s hardware section as a design decision rather than an accident: the
+GPU belongs to Ollama, and overflowing the 8GB drops throughput ~30x with no
+graceful degradation. If the detector is ever too slow the fix is lowering
+`detector.fps` or `camera.max_frame_px`, never moving it to the GPU.
+
+## Next task
+
+In order:
+
+1. **Approve the `yolo11n.pt` download** (~5.4 MB, ultralytics GitHub
+   releases, lands in `C:\Users\sawye\weights`). Nothing downstream can be
+   checked until the model can load.
+2. **Drop a photo of the room somewhere** and set `config.camera.source` to
+   `"image"` with `path` pointing at it. That makes the whole pipeline
+   verifiable with no camera: real detections, a subject picked, `person_pos`
+   written, and the face visibly tracking toward the person in the photo.
+3. **Benchmark `Detector.detect()` on the CPU** at 512px and record the
+   per-frame cost, so the 3fps in `config.json` is grounded in a number rather
+   than an assumption.
+4. **When the webcam arrives**, flip `config.camera.source` back to
+   `"camera"` and confirm the mirror direction is right in the room, with the
+   camera in its actual position.
+
+Only then is step 2 done. Step 3 is `web.py` — the config UI with a live
+preview.
+
 ## Mood drives movement
 
 Runtime state still picks *where* the face goes. Mood now scales *how* it gets
@@ -284,9 +393,6 @@ Keys in the preview window:
 - **`config.json` `display.width`/`height` are unread.** `face.py` has 64x64
   as constants because the plan says render natively. Either the config keys
   go, or `face.py` reads them. No urgency.
-- **Tracking is not mirrored.** A person at `person_pos.x = 0.1` makes the
-  pupils go to the viewer's left. Whether that is correct depends on whether
-  the camera image is mirrored — settle it against a real camera in step 2.
 - **Mood decay is read-only.** The animator treats a mood as expired once
   `mood_until` has passed, but nothing writes `state.mood` back to `neutral`.
   Whoever sets moods in step 4 should decide whether the field gets reset.

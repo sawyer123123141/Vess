@@ -1,17 +1,20 @@
 """Vess.
 
-Step 1: build the state, render the face, show it in a window. No perception,
-no voice, no threads yet -- the loop is the only thing running.
+Steps 1-2: build the state, run the detector in its own thread, render the
+face from what it finds. The render loop never waits on perception.
 """
 
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 
 from output.animator import FaceAnimator
 from output.display import Display, PreviewWindow
+from perception import camera as camera_module
+from perception.detector import Detector, run_detection_loop
 from state import State
 
 ROOT = Path(__file__).resolve().parent
@@ -32,6 +35,42 @@ def _load(name: str) -> dict:
     return json.loads((ROOT / name).read_text(encoding="utf-8"))
 
 
+def _start_perception(config: dict, state: State,
+                      stop: threading.Event) -> tuple[threading.Thread | None, object]:
+    """Bring up tier 1, or say why not and carry on without it.
+
+    A missing camera must not stop the face rendering -- and without a source
+    the fake-position key below is the only way to exercise tracking, so it
+    stays useful rather than being replaced.
+    """
+    try:
+        camera = camera_module.open_camera(config)
+    except RuntimeError as error:
+        print(f"perception off: {error}")
+        return None, None
+
+    try:
+        detector = Detector(config["detector"]["model"],
+                            float(config["detector"].get("confidence", 0.4)))
+    except Exception as error:                      # model load, download, weights
+        print(f"perception off: cannot load detector -- {error}")
+        camera.close()
+        return None, None
+
+    thread = threading.Thread(
+        target=run_detection_loop,
+        args=(state, camera, detector, float(config["detector"]["fps"]), stop),
+        name="detector",
+        daemon=True,
+    )
+    thread.start()
+    source = config.get("camera", {}).get("source", "camera")
+    mirrored = "mirrored" if config.get("camera", {}).get("mirror", True) else "not mirrored"
+    print(f"perception on: {source}, {mirrored}, "
+          f"{config['detector']['fps']}fps on cpu")
+    return thread, camera
+
+
 def main() -> None:
     config = _load("config.json")
     moods = _load("moods.json")
@@ -40,6 +79,9 @@ def main() -> None:
     state = State()
     animator = FaceAnimator(moods)
     display = Display([PreviewWindow(scale=config["display"]["preview_scale"])])
+
+    stop = threading.Event()
+    thread, camera = _start_perception(config, state, stop)
 
     print("keys:")
     for index, name in enumerate(mood_names, start=1):
@@ -87,6 +129,11 @@ def main() -> None:
 
             time.sleep(max(0.0, FRAME_TIME - (time.perf_counter() - now)))
     finally:
+        stop.set()
+        if thread is not None:
+            thread.join(timeout=2.0)
+        if camera is not None:
+            camera.close()
         display.close()
 
 
