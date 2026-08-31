@@ -1,0 +1,11 @@
+numpy
+opencv-python
+ultralytics
+faster-whisper
+sounddevice
+kokoro
+soundfile
+ollama
+fastapi
+uvicorn
+websockets

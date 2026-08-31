@@ -1,0 +1,65 @@
+{
+  "persona": "friendly",
+  "personas": {
+    "friendly": "Warm, casual, a bit playful. Two sentences max.",
+    "concise": "Terse. Answer and stop. Usually one sentence.",
+    "dry": "Understated, mildly sardonic. Never enthusiastic."
+  },
+
+  "llm": {
+    "model": "qwen2.5:7b",
+    "context": 4096,
+    "num_predict": 80,
+    "keep_alive": -1
+  },
+
+  "vision": {
+    "model": "llava:7b",
+    "max_frame_px": 512
+  },
+
+  "whisper": {
+    "model": "small",
+    "device": "cpu",
+    "compute_type": "int8"
+  },
+
+  "voice": {
+    "engine": "kokoro",
+    "name": "af_heart",
+    "sample_rate": 24000
+  },
+
+  "detector": {
+    "model": "yolo11n.pt",
+    "fps": 3
+  },
+
+  "display": {
+    "width": 64,
+    "height": 64,
+    "preview_scale": 8,
+    "panel_enabled": false,
+    "panel_host": ""
+  },
+
+  "triggers": {
+    "min_absence_hours": 4,
+    "cooldown_minutes": 60,
+    "quiet_after_hour": 22,
+    "quiet_before_hour": 8
+  },
+
+  "apps": {
+    "browser": "",
+    "spotify": "",
+    "unity": "",
+    "discord": "",
+    "vscode": ""
+  },
+
+  "web": {
+    "port": 8080,
+    "open_browser_on_start": true
+  }
+}
