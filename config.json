@@ -44,7 +44,11 @@
   "voice": {
     "engine": "kokoro",
     "name": "af_heart",
-    "sample_rate": 24000
+    "sample_rate": 24000,
+    "chatterbox": {
+      "device": "cuda",
+      "reference_audio": ""
+    }
   },
   "camera": {
     "source": "image",
