@@ -180,6 +180,40 @@ class TtsPipelineTests(unittest.TestCase):
         self.assertIn("tts_gap_ms", values)
         self.assertGreaterEqual(values["tts_gap_ms"], 0.0)
 
+    def test_playback_reports_waveform_edge_silence(self) -> None:
+        state = State()
+
+        def synthesize(text: str) -> np.ndarray:
+            return np.concatenate(
+                [
+                    np.zeros(20, dtype=np.float32),
+                    np.ones(50, dtype=np.float32),
+                    np.zeros(30, dtype=np.float32),
+                ]
+            )
+
+        voice = VoiceOutput(
+            {"voice": {"sample_rate": 1_000}},
+            state,
+            RecordingLog(),
+            synthesize=synthesize,
+            play=lambda audio, sample_rate: None,
+        )
+        voice.start()
+        voice.begin_generation(1)
+        voice.enqueue("measured", generation_id=1)
+        voice.close()
+
+        playback_events = [
+            event
+            for event in state.debug_snapshot()["events"]
+            if event["event"] == "tts_playback_started"
+        ]
+        self.assertEqual(len(playback_events), 1)
+        event = playback_events[0]
+        self.assertEqual(event["leading_silence_ms"], 20.0)
+        self.assertEqual(event["trailing_silence_ms"], 30.0)
+
 
 if __name__ == "__main__":
     unittest.main()
