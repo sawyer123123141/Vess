@@ -16,6 +16,11 @@ class TtsFactoryTests(unittest.TestCase):
         self.assertEqual(type(engine).__name__, "KokoroEngine")
         self.assertIsNone(engine._pipeline)
 
+    def test_chatterbox_selection_builds_lazy_adapter(self) -> None:
+        engine = create_tts_engine({"voice": {"engine": "chatterbox_turbo"}})
+        self.assertEqual(type(engine).__name__, "ChatterboxTurboEngine")
+        self.assertIsNone(engine._model)
+
     def test_unknown_engine_fails_clearly(self) -> None:
         with self.assertRaisesRegex(ValueError, "unknown TTS engine"):
             create_tts_engine({"voice": {"engine": "made_up"}})
