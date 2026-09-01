@@ -18,7 +18,10 @@
   "whisper": {
     "model": "small",
     "device": "cpu",
-    "compute_type": "int8"
+    "compute_type": "int8",
+    "language": "en",
+    "beam_size": 1,
+    "condition_on_previous_text": false
   },
   "audio": {
     "device": null,
@@ -26,9 +29,10 @@
     "channels": 1,
     "vad_threshold": 0.015,
     "min_utterance_seconds": 0.25,
-    "silence_seconds": 0.8,
+    "silence_seconds": 0.45,
     "max_utterance_seconds": 15.0,
     "pre_roll_seconds": 0.25,
+    "conversation_timeout_seconds": 30.0,
     "wake_variants": ["hey vess", "hey best", "hey guess", "heaviest"],
     "wake_max_distance": 2
   },
