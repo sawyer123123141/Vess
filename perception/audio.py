@@ -132,6 +132,7 @@ class AudioLoop:
         self._event_log = event_log
         self._on_request = on_request
         self._transcribe = transcribe
+        self._sample_rate = int(settings.get("sample_rate", 16_000))
         self._variants = list(settings.get("wake_variants", ["hey vess"]))
         self._max_distance = int(settings.get("wake_max_distance", 2))
         self._conversation_timeout = float(
@@ -191,6 +192,7 @@ class AudioLoop:
             transcription_started,
             transcription_finished,
             speech_ended_at,
+            int(np.asarray(samples).size),
         )
 
         self._state.record_debug("transcript", transcript=transcript)
@@ -254,6 +256,7 @@ class AudioLoop:
             transcription_started,
             transcription_finished,
             speech_ended_at,
+            int(np.asarray(samples).size),
         )
         self._state.record_debug(
             "transcript",
@@ -520,12 +523,24 @@ class AudioLoop:
 
     def _run_transcription(self) -> None:
         if self._transcribe is None:
+            load_started = time.perf_counter()
             try:
                 self._transcribe = _make_transcriber(self._config)
             except Exception as error:
                 self._transcriber_failed.set()
                 self._record_audio_error(error)
                 return
+            load_finished = time.perf_counter()
+            settings = self._config.get("whisper", {})
+            payload = {
+                "whisper_model": str(settings.get("model", "small")),
+                "whisper_device": str(settings.get("device", "cpu")),
+                "whisper_compute_type": str(settings.get("compute_type", "int8")),
+                "whisper_device_index": int(settings.get("device_index", 0)),
+                "whisper_load_ms": round((load_finished - load_started) * 1000.0, 1),
+            }
+            self._state.update_debug(**payload)
+            self._state.record_debug("whisper_ready", **payload)
 
         while True:
             item = self._utterances.get()
@@ -552,15 +567,27 @@ class AudioLoop:
         transcription_started: float,
         transcription_finished: float,
         speech_ended_at: float | None,
+        sample_count: int,
     ) -> None:
-        if speech_ended_at is None:
-            return
-        transcription_ms = (transcription_finished - transcription_started) * 1000.0
-        speech_to_transcript_ms = (transcription_finished - speech_ended_at) * 1000.0
-        self._state.update_debug(
-            transcription_ms=round(transcription_ms, 1),
-            speech_to_transcript_ms=round(speech_to_transcript_ms, 1),
+        transcription_seconds = max(transcription_finished - transcription_started, 0.0)
+        utterance_seconds = (
+            max(sample_count, 0) / self._sample_rate if self._sample_rate > 0 else 0.0
         )
+        payload: dict[str, object] = {
+            "transcription_ms": round(transcription_seconds * 1000.0, 1),
+            "utterance_seconds": round(utterance_seconds, 3),
+            "transcription_rtf": (
+                round(transcription_seconds / utterance_seconds, 3)
+                if utterance_seconds > 0.0
+                else None
+            ),
+        }
+        if speech_ended_at is not None:
+            payload["speech_to_transcript_ms"] = round(
+                (transcription_finished - speech_ended_at) * 1000.0,
+                1,
+            )
+        self._state.update_debug(**payload)
 
     def _record_audio_error(self, error: Exception) -> None:
         self._event_log.append("audio_error", {"error": str(error)})
@@ -680,7 +707,7 @@ def _input_adc_time(time_info: object) -> float | None:
 
 
 def _make_transcriber(config: dict[str, Any]) -> Callable[[np.ndarray], str]:
-    """Create the local CPU/int8 Whisper transcriber only for live capture."""
+    """Create the configured faster-whisper transcriber for live capture."""
     from faster_whisper import WhisperModel
 
     settings = config.get("whisper", {})
@@ -688,6 +715,9 @@ def _make_transcriber(config: dict[str, Any]) -> Callable[[np.ndarray], str]:
         settings.get("model", "small"),
         device=settings.get("device", "cpu"),
         compute_type=settings.get("compute_type", "int8"),
+        device_index=int(settings.get("device_index", 0)),
+        cpu_threads=int(settings.get("cpu_threads", 0)),
+        num_workers=int(settings.get("num_workers", 1)),
     )
 
     def transcribe(samples: np.ndarray) -> str:
