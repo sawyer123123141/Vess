@@ -1,4 +1,4 @@
-"""Append-only event history for later memory work."""
+"""Short-term conversation memory and append-only event history."""
 
 from __future__ import annotations
 
@@ -10,8 +10,69 @@ import time
 from pathlib import Path
 from typing import Any
 
+from state import ConversationTurn
+
 
 EventRecord = tuple[float, str, str]
+
+
+def append_conversation_turn(
+    state: Any,
+    user: str,
+    assistant: str,
+    *,
+    timestamp: float | None = None,
+    max_age_seconds: float,
+    max_turns: int,
+) -> ConversationTurn:
+    """Store one completed exchange and keep short-term history bounded."""
+    now = time.time() if timestamp is None else float(timestamp)
+    turn = ConversationTurn(now, user, assistant)
+    with state.locked():
+        state.conversation_turns.append(turn)
+        _prune_turns_locked(
+            state,
+            now=now,
+            max_age_seconds=max_age_seconds,
+            max_turns=max_turns,
+        )
+    return turn
+
+
+def recent_conversation_turns(
+    state: Any,
+    *,
+    now: float | None = None,
+    max_age_seconds: float,
+    max_turns: int,
+) -> list[ConversationTurn]:
+    """Return the bounded recent transcript without exposing the live list."""
+    current = time.time() if now is None else float(now)
+    with state.locked():
+        _prune_turns_locked(
+            state,
+            now=current,
+            max_age_seconds=max_age_seconds,
+            max_turns=max_turns,
+        )
+        return list(state.conversation_turns)
+
+
+def _prune_turns_locked(
+    state: Any,
+    *,
+    now: float,
+    max_age_seconds: float,
+    max_turns: int,
+) -> None:
+    if max_age_seconds <= 0.0 or max_turns <= 0:
+        state.conversation_turns.clear()
+        return
+
+    cutoff = now - max_age_seconds
+    state.conversation_turns[:] = [
+        turn for turn in state.conversation_turns if turn.timestamp >= cutoff
+    ][-max_turns:]
 
 
 class EventLog:
