@@ -27,8 +27,6 @@ from state import State
 ROOT = Path(__file__).resolve().parent
 FRAME_TIME = 1.0 / 30.0
 
-# Stand-ins for the detector, so the tracking path can be exercised before
-# camera.py exists. Normalised 0-1, same as state.person_pos will be.
 FAKE_PERSON_POSITIONS: tuple[tuple[float, float] | None, ...] = (
     None,
     (0.12, 0.50),
@@ -48,12 +46,7 @@ def _load_performances() -> dict[str, dict[str, object]]:
 
 def _start_perception(config: dict, state: State,
                       stop: threading.Event) -> tuple[threading.Thread | None, object]:
-    """Bring up tier 1, or say why not and carry on without it.
-
-    A missing camera must not stop the face rendering -- and without a source
-    the fake-position key below is the only way to exercise tracking, so it
-    stays useful rather than being replaced.
-    """
+    """Bring up tier 1, or say why not and carry on without it."""
     try:
         camera = camera_module.open_camera(config)
     except RuntimeError as error:
@@ -63,7 +56,7 @@ def _start_perception(config: dict, state: State,
     try:
         detector = Detector(config["detector"]["model"],
                             float(config["detector"].get("confidence", 0.4)))
-    except Exception as error:                      # model load, download, weights
+    except Exception as error:
         print(f"perception off: cannot load detector -- {error}")
         camera.close()
         return None, None
@@ -129,7 +122,7 @@ def main() -> None:
     event_log = EventLog(ROOT / "vess.db")
     event_log.append("session_started", {})
     state = State()
-    animator = FaceAnimator(moods)
+    animator = FaceAnimator(moods, performances)
     display, web_server = _build_display(config, state, event_log)
 
     voice = VoiceOutput(config, state, event_log)
@@ -178,7 +171,6 @@ def main() -> None:
     try:
         while display.is_open():
             now = time.perf_counter()
-            # A stall shouldn't fast-forward the animation to catch up.
             dt = min(now - last, 0.1)
             last = now
 
@@ -202,8 +194,6 @@ def main() -> None:
                     state.person_present = position is not None
                 print(f"person_pos -> {position}")
             elif key in (ord("k"), ord("l")):
-                # The face reacts to thinking and listening, and nothing sets
-                # either yet, so they need a key to be visible at all.
                 field = "thinking" if key == ord("k") else "listening"
                 with state.locked():
                     value = not getattr(state, field)
