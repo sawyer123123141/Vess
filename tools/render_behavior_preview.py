@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from output.animator import FaceAnimator, _SPEAK_BREAK_LENGTH
+from output.animator import FaceAnimator, _MODE_EYE_OFFSETS, _SPEAK_BREAK_LENGTH
 from performance import PerformanceCue, load_performance_definitions
 from state import State
 from tools.behavior_scenarios import (
@@ -30,12 +30,14 @@ from tools.behavior_scenarios import (
 
 _PANEL_MIN = 1.0
 _PANEL_MAX = 63.0
+_EYE_OFFSET_LIMIT = 1.5
 _TRANSITION_SECONDS = 0.25
 _DEFAULT_OUTPUT = ROOT / "artifacts" / "behavior-verification"
 _DEFAULT_SCENARIOS = (
     "conversational_cycle",
     "priority_conflicts",
     "geometry_stress",
+    "eye_reaction_cycle",
 )
 _SHAPE_DELTA_KEYS = (
     "l_h",
@@ -50,6 +52,12 @@ _UNIT_SCALE_KEYS = (
     "ease_scale",
     "track_bias_scale",
     "speaking_break_scale",
+)
+_EYE_OFFSET_KEYS = (
+    "left_eye_offset_x",
+    "left_eye_offset_y",
+    "right_eye_offset_x",
+    "right_eye_offset_y",
 )
 
 
@@ -155,6 +163,7 @@ def check_invariants(result: SimulationResult) -> list[VerificationFailure]:
             failures.extend(_thinking_failures(result, rows))
 
     failures.extend(_speaking_failures(result, stable_rows))
+    failures.extend(_eye_lifecycle_failures(result))
     return failures
 
 
@@ -227,12 +236,6 @@ def calculate_metrics(result: SimulationResult) -> dict[str, object]:
         ),
         default=0.0,
     )
-    max_gaze_delta = _max_pair_delta(result.trace, "gaze_x", "gaze_y")
-    max_face_delta = _max_pair_delta(
-        result.trace,
-        "face_offset_x",
-        "face_offset_y",
-    )
 
     return {
         "total_frames": len(result.trace),
@@ -244,9 +247,24 @@ def calculate_metrics(result: SimulationResult) -> dict[str, object]:
         ),
         "max_break_seconds": max(break_lengths) if break_lengths else None,
         "peak_face_offset": peak_face_offset,
-        "max_frame_gaze_delta": max_gaze_delta,
-        "max_frame_face_delta": max_face_delta,
+        "max_frame_gaze_delta": _max_pair_delta(result.trace, "gaze_x", "gaze_y"),
+        "max_frame_face_delta": _max_pair_delta(
+            result.trace,
+            "face_offset_x",
+            "face_offset_y",
+        ),
         "performance_eye_deltas": _performance_eye_deltas(result),
+        "eye_motion_by_performance": _eye_motion_by_performance(result),
+        "max_frame_left_eye_delta": _max_pair_delta(
+            result.trace,
+            "left_eye_offset_x",
+            "left_eye_offset_y",
+        ),
+        "max_frame_right_eye_delta": _max_pair_delta(
+            result.trace,
+            "right_eye_offset_x",
+            "right_eye_offset_y",
+        ),
     }
 
 
@@ -268,6 +286,7 @@ def build_summary(
         "frame format",
         "gaze bounds",
         "performance intensity",
+        "eye offset bounds",
         "eye dimensions",
         "geometry bounds",
     }
@@ -311,15 +330,37 @@ def build_summary(
                 f"  peak face offset: {float(metrics['peak_face_offset']):.3f} px",
                 f"  max frame gaze delta: {float(metrics['max_frame_gaze_delta']):.3f}",
                 f"  max frame face delta: {float(metrics['max_frame_face_delta']):.3f} px",
+                f"  max frame L/R eye delta: {float(metrics['max_frame_left_eye_delta']):.3f} / "
+                f"{float(metrics['max_frame_right_eye_delta']):.3f} px",
             ]
         )
         deltas = dict(metrics["performance_eye_deltas"])
         if deltas:
-            lines.extend(["", "Performance"])
+            lines.extend(["", "Performance shape"])
             for expression, values in deltas.items():
                 lines.append(
                     f"  {expression} max L/R eye delta: "
                     f"{float(values['left']):.3f} / {float(values['right']):.3f} px"
+                )
+
+    eye_source = next(
+        (result for result in items if result.scenario == "eye_reaction_cycle"),
+        conversational,
+    )
+    if eye_source is not None:
+        eye_metrics = calculate_metrics(eye_source)
+        eye_motion = dict(eye_metrics["eye_motion_by_performance"])
+        if eye_motion:
+            lines.extend(["", "Independent eye motion"])
+            for expression, values in eye_motion.items():
+                lines.extend(
+                    [
+                        f"  {expression} L peak x/y: "
+                        f"{float(values['left_peak_x']):.3f} / {float(values['left_peak_y']):.3f} px",
+                        f"  {expression} R peak x/y: "
+                        f"{float(values['right_peak_x']):.3f} / {float(values['right_peak_y']):.3f} px",
+                        f"  {expression} asymmetry: {float(values['max_asymmetry']):.3f} px",
+                    ]
                 )
 
     for failure in all_failures:
@@ -367,7 +408,7 @@ def write_preview(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     gif_frames: list[Image.Image] = []
-    label_height = 24
+    label_height = 36
     for index in range(0, len(result.frames), sample_every):
         native = result.frames[index]
         row = result.trace[index]
@@ -383,10 +424,11 @@ def write_preview(
         )
         draw = ImageDraw.Draw(canvas)
         label = (
-            f"{row['phase']} | {row['interaction_mode']} | "
-            f"{row['performance_expression']}"
+            f"{row['phase']} | {row['interaction_mode']} | {row['performance_expression']}\n"
+            f"L {float(row['left_eye_offset_x']):+.2f},{float(row['left_eye_offset_y']):+.2f}  "
+            f"R {float(row['right_eye_offset_x']):+.2f},{float(row['right_eye_offset_y']):+.2f}"
         )
-        draw.text((6, 6), label, fill=(235, 235, 240))
+        draw.text((6, 4), label, fill=(235, 235, 240))
         canvas.paste(scaled, (0, label_height))
         gif_frames.append(canvas)
 
@@ -481,6 +523,10 @@ def _trace_record(
     gaze = tuple(snapshot["render_gaze"])
     offset = tuple(snapshot["render_offset"])
     fixation = tuple(snapshot["fixation"])
+    left_eye_offset = tuple(snapshot["left_eye_offset"])
+    right_eye_offset = tuple(snapshot["right_eye_offset"])
+    left_eye_settled = tuple(snapshot["left_eye_settled_target"])
+    right_eye_settled = tuple(snapshot["right_eye_settled_target"])
 
     person_x = float(person_pos[0]) if person_pos is not None else None
     person_y = float(person_pos[1]) if person_pos is not None else None
@@ -508,10 +554,16 @@ def _trace_record(
         "left_eye_y": float(shape["l_cy"]),
         "right_eye_x": float(shape["r_cx"]),
         "right_eye_y": float(shape["r_cy"]),
-        "left_eye_offset_x": 0.0,
-        "left_eye_offset_y": 0.0,
-        "right_eye_offset_x": 0.0,
-        "right_eye_offset_y": 0.0,
+        "left_eye_offset_x": float(left_eye_offset[0]),
+        "left_eye_offset_y": float(left_eye_offset[1]),
+        "right_eye_offset_x": float(right_eye_offset[0]),
+        "right_eye_offset_y": float(right_eye_offset[1]),
+        "left_eye_settled_target_x": float(left_eye_settled[0]),
+        "left_eye_settled_target_y": float(left_eye_settled[1]),
+        "right_eye_settled_target_x": float(right_eye_settled[0]),
+        "right_eye_settled_target_y": float(right_eye_settled[1]),
+        "eye_reaction_phase": str(snapshot["reaction_phase"]),
+        "eye_reaction_elapsed": float(snapshot["reaction_elapsed"]),
         "left_eye_width": float(shape["l_w"]),
         "left_eye_height": float(shape["l_h"]),
         "right_eye_width": float(shape["r_w"]),
@@ -589,6 +641,14 @@ def _global_failures(
             )
         )
 
+    bad_offsets = {
+        key: float(row[key])
+        for key in _EYE_OFFSET_KEYS
+        if not -_EYE_OFFSET_LIMIT <= float(row[key]) <= _EYE_OFFSET_LIMIT
+    }
+    if bad_offsets:
+        failures.append(_failure(result, row, "eye offset bounds", bad_offsets))
+
     for side in ("left", "right"):
         width = float(row[f"{side}_eye_width"])
         height = float(row[f"{side}_eye_height"])
@@ -642,6 +702,30 @@ def _global_failures(
         if wrong:
             failures.append(
                 _failure(result, row, "neutral performance target", wrong)
+            )
+
+        mode = str(row["interaction_mode"])
+        mode_left, mode_right = _MODE_EYE_OFFSETS.get(
+            mode,
+            _MODE_EYE_OFFSETS["idle"],
+        )
+        settled = (
+            float(row["left_eye_settled_target_x"]),
+            float(row["left_eye_settled_target_y"]),
+            float(row["right_eye_settled_target_x"]),
+            float(row["right_eye_settled_target_y"]),
+        )
+        expected = (
+            mode_left[0], mode_left[1], mode_right[0], mode_right[1],
+        )
+        if any(abs(actual - wanted) > 1e-9 for actual, wanted in zip(settled, expected)):
+            failures.append(
+                _failure(
+                    result,
+                    row,
+                    "neutral eye motion target",
+                    {"actual": settled, "expected": expected},
+                )
             )
 
     return failures
@@ -842,6 +926,84 @@ def _speaking_failures(
     return failures
 
 
+def _eye_lifecycle_failures(result: SimulationResult) -> list[VerificationFailure]:
+    if result.scenario != "eye_reaction_cycle":
+        return []
+
+    failures: list[VerificationFailure] = []
+    phase_rows: dict[str, list[dict[str, object]]] = {}
+    for row in result.trace:
+        phase_rows.setdefault(str(row["phase"]), []).append(row)
+
+    for name, rows in phase_rows.items():
+        if not name.startswith("neutral_"):
+            continue
+        release = [row for row in rows if row["eye_reaction_phase"] == "release"]
+        previous_distance: float | None = None
+        for row in release:
+            distance = _eye_distance_to_settled(row)
+            if previous_distance is not None and distance > previous_distance + 1e-9:
+                failures.append(
+                    _failure(
+                        result,
+                        row,
+                        "eye release convergence",
+                        {"previous_distance": previous_distance, "distance": distance},
+                    )
+                )
+                break
+            previous_distance = distance
+
+    previous: dict[str, object] | None = None
+    for row in result.trace:
+        if previous is not None:
+            old_expression = str(previous["performance_expression"])
+            new_expression = str(row["performance_expression"])
+            if (
+                old_expression != new_expression
+                and old_expression != "neutral"
+                and new_expression != "neutral"
+            ):
+                previous_magnitude = _eye_offset_magnitude(previous)
+                current_magnitude = _eye_offset_magnitude(row)
+                if previous_magnitude > 1e-4 and current_magnitude <= 1e-8:
+                    failures.append(
+                        _failure(
+                            result,
+                            row,
+                            "eye cue transition continuity",
+                            {
+                                "previous_expression": old_expression,
+                                "new_expression": new_expression,
+                                "previous_magnitude": previous_magnitude,
+                                "current_magnitude": current_magnitude,
+                            },
+                        )
+                    )
+        previous = row
+
+    return failures
+
+
+def _eye_distance_to_settled(row: dict[str, object]) -> float:
+    return (
+        abs(float(row["left_eye_offset_x"]) - float(row["left_eye_settled_target_x"]))
+        + abs(float(row["left_eye_offset_y"]) - float(row["left_eye_settled_target_y"]))
+        + abs(float(row["right_eye_offset_x"]) - float(row["right_eye_settled_target_x"]))
+        + abs(float(row["right_eye_offset_y"]) - float(row["right_eye_settled_target_y"]))
+    )
+
+
+def _eye_offset_magnitude(row: dict[str, object]) -> float:
+    return math.hypot(
+        float(row["left_eye_offset_x"]),
+        float(row["left_eye_offset_y"]),
+    ) + math.hypot(
+        float(row["right_eye_offset_x"]),
+        float(row["right_eye_offset_y"]),
+    )
+
+
 def _person_dot(row: dict[str, object]) -> float:
     person_x = row["person_x"]
     person_y = row["person_y"]
@@ -947,6 +1109,34 @@ def _performance_eye_deltas(
             )
         deltas[expression] = side_deltas
     return deltas
+
+
+def _eye_motion_by_performance(
+    result: SimulationResult,
+) -> dict[str, dict[str, float]]:
+    groups: dict[str, list[dict[str, object]]] = {}
+    for row in result.trace:
+        expression = str(row["performance_expression"])
+        if expression == "neutral":
+            continue
+        groups.setdefault(expression, []).append(row)
+
+    metrics: dict[str, dict[str, float]] = {}
+    for expression, rows in groups.items():
+        metrics[expression] = {
+            "left_peak_x": max(abs(float(row["left_eye_offset_x"])) for row in rows),
+            "left_peak_y": max(abs(float(row["left_eye_offset_y"])) for row in rows),
+            "right_peak_x": max(abs(float(row["right_eye_offset_x"])) for row in rows),
+            "right_peak_y": max(abs(float(row["right_eye_offset_y"])) for row in rows),
+            "max_asymmetry": max(
+                math.hypot(
+                    float(row["left_eye_offset_x"]) - float(row["right_eye_offset_x"]),
+                    float(row["left_eye_offset_y"]) - float(row["right_eye_offset_y"]),
+                )
+                for row in rows
+            ),
+        }
+    return metrics
 
 
 def _failure(
