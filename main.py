@@ -12,9 +12,13 @@ import time
 import webbrowser
 from pathlib import Path
 
+from brain.llm import ConversationWorker, OllamaClient
+from brain.memory import EventLog
 from control.web import WebServer
 from output.animator import FaceAnimator
 from output.display import Display, PreviewWindow
+from output.voice import VoiceOutput
+from perception.audio import AudioLoop
 from perception import camera as camera_module
 from perception.detector import Detector, run_detection_loop
 from state import State
@@ -73,7 +77,11 @@ def _start_perception(config: dict, state: State,
     return thread, camera
 
 
-def _build_display(config: dict, state: State) -> tuple[Display, WebServer | None]:
+def _build_display(
+    config: dict,
+    state: State,
+    event_log: EventLog | None = None,
+) -> tuple[Display, WebServer | None]:
     """Build every enabled output target around the one rendered frame."""
     display_config = config.get("display", {})
     web_config = config.get("web", {})
@@ -81,7 +89,11 @@ def _build_display(config: dict, state: State) -> tuple[Display, WebServer | Non
     web_server = None
 
     if web_config.get("enabled", True):
-        web_server = WebServer(state, int(web_config.get("port", 8080)))
+        web_server = WebServer(
+            state,
+            int(web_config.get("port", 8080)),
+            event_log,
+        )
         targets.append(web_server.preview)
     if display_config.get("cv2_enabled", False):
         targets.append(PreviewWindow(scale=display_config.get("preview_scale", 8)))
@@ -94,14 +106,36 @@ def _open_browser(port: int) -> None:
     webbrowser.open(f"http://127.0.0.1:{port}")
 
 
+def _expire_mood(state: State, event_log: object, now: float) -> None:
+    """Make expiry an explicit state transition and retain it in history."""
+    transition = state.expire_mood(now)
+    if transition is None:
+        return
+    previous_mood, _ = transition
+    event_log.append("mood_changed", {"from": previous_mood, "to": "neutral"})
+
+
 def main() -> None:
     config = _load("config.json")
     moods = _load("moods.json")
     mood_names = list(moods)
 
+    event_log = EventLog(ROOT / "vess.db")
+    event_log.append("session_started", {})
     state = State()
     animator = FaceAnimator(moods)
-    display, web_server = _build_display(config, state)
+    display, web_server = _build_display(config, state, event_log)
+
+    voice = VoiceOutput(config, state, event_log)
+    conversation = ConversationWorker(
+        config,
+        moods,
+        state,
+        event_log,
+        OllamaClient(),
+        voice,
+    )
+    audio = AudioLoop(config, state, event_log, conversation.submit)
 
     stop = threading.Event()
     thread, camera = _start_perception(config, state, stop)
@@ -114,6 +148,15 @@ def main() -> None:
                 name="browser",
                 daemon=True,
             ).start()
+
+    voice.start()
+    voice.prepare_acknowledgement()
+    conversation.start()
+    try:
+        audio.start()
+    except RuntimeError as error:
+        print(f"voice off: {error}")
+        audio = None
 
     print("keys:")
     for index, name in enumerate(mood_names, start=1):
@@ -132,6 +175,7 @@ def main() -> None:
             dt = min(now - last, 0.1)
             last = now
 
+            _expire_mood(state, event_log, time.time())
             display.show(animator.tick(state, dt))
 
             key = display.poll_key()
@@ -161,6 +205,10 @@ def main() -> None:
 
             time.sleep(max(0.0, FRAME_TIME - (time.perf_counter() - now)))
     finally:
+        if audio is not None:
+            audio.close()
+        conversation.close()
+        voice.close()
         stop.set()
         if thread is not None:
             thread.join(timeout=2.0)
@@ -169,6 +217,7 @@ def main() -> None:
         if web_server is not None:
             web_server.close()
         display.close()
+        event_log.close()
 
 
 if __name__ == "__main__":

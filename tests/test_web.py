@@ -59,6 +59,23 @@ class WebPreviewTests(unittest.TestCase):
         with state.locked():
             self.assertIsNone(state.color)
 
+    def test_color_endpoints_record_explicit_override_history(self) -> None:
+        web = _web_module()
+        log = RecordingLog()
+        app = web.create_app(State(), web.WebPreview(), event_log=log)
+
+        with TestClient(app) as client:
+            client.put("/color", json={"color": [12, 34, 56]})
+            client.delete("/color")
+
+        self.assertEqual(
+            log.events,
+            [
+                ("color_override_set", {"color": [12, 34, 56]}),
+                ("color_override_cleared", {}),
+            ],
+        )
+
     def test_homepage_polls_lossless_preview_at_30fps_with_color_controls(self) -> None:
         web = _web_module()
         app = web.create_app(State(), web.WebPreview())
@@ -104,6 +121,14 @@ def _web_module():
         return importlib.import_module("control.web")
     except ModuleNotFoundError:
         raise AssertionError("browser preview target is missing") from None
+
+
+class RecordingLog:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict[str, object]]] = []
+
+    def append(self, event_type: str, payload: dict[str, object]) -> None:
+        self.events.append((event_type, payload))
 
 
 def _free_port() -> int:

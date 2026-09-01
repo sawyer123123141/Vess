@@ -23,6 +23,25 @@ class MainTests(unittest.TestCase):
 
         self.assertIsNotNone(server.preview.png())
 
+    def test_expired_mood_is_logged(self) -> None:
+        state = State(mood="annoyed", mood_until=10.0)
+        log = RecordingLog()
+
+        main._expire_mood(state, log, 10.1)
+
+        self.assertEqual(
+            log.events,
+            [("mood_changed", {"from": "annoyed", "to": "neutral"})],
+        )
+
+
+class RecordingLog:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict[str, object]]] = []
+
+    def append(self, event_type: str, payload: dict[str, object]) -> None:
+        self.events.append((event_type, payload))
+
 
 if __name__ == "__main__":
     unittest.main()

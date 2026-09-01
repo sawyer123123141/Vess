@@ -100,10 +100,10 @@ class WebPreview(DisplayTarget):
 class WebServer:
     """Runs the local control UI without owning the render loop."""
 
-    def __init__(self, state: State, port: int) -> None:
+    def __init__(self, state: State, port: int, event_log: object | None = None) -> None:
         self.preview = WebPreview()
         config = uvicorn.Config(
-            create_app(state, self.preview), host="127.0.0.1", port=port,
+            create_app(state, self.preview, event_log), host="127.0.0.1", port=port,
             log_level="warning", access_log=False, ws="none")
         self._server = uvicorn.Server(config)
         self._thread: threading.Thread | None = None
@@ -119,7 +119,11 @@ class WebServer:
             self._thread.join(timeout=2.0)
 
 
-def create_app(state: State, preview: WebPreview) -> FastAPI:
+def create_app(
+    state: State,
+    preview: WebPreview,
+    event_log: object | None = None,
+) -> FastAPI:
     """Build the local web app around the supplied state and frame target."""
     app = FastAPI()
 
@@ -141,12 +145,16 @@ def create_app(state: State, preview: WebPreview) -> FastAPI:
             raise HTTPException(status_code=422, detail="color must be three values from 0 to 255")
         with state.locked():
             state.color = tuple(color)
+        if event_log is not None:
+            event_log.append("color_override_set", {"color": color})
         return {"color": color}
 
     @app.delete("/color")
     def reset_color() -> dict[str, None]:
         with state.locked():
             state.color = None
+        if event_log is not None:
+            event_log.append("color_override_cleared", {})
         return {"color": None}
 
     return app

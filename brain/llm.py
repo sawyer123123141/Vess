@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import queue
+import threading
+import time
 from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 from urllib import request as url_request
@@ -127,6 +130,91 @@ class OllamaClient:
             method="POST",
         )
         return self._opener(request, timeout=60)
+
+
+class ConversationWorker:
+    """Serialize local responses without ever blocking the render loop."""
+
+    def __init__(
+        self,
+        config: dict[str, Any],
+        moods: dict[str, dict[str, Any]],
+        state: Any,
+        event_log: Any,
+        client: OllamaClient,
+        voice: Any,
+    ) -> None:
+        self._config = config
+        self._moods = moods
+        self._state = state
+        self._event_log = event_log
+        self._client = client
+        self._voice = voice
+        self._requests: queue.Queue[str | None] = queue.Queue()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(
+            target=self._run,
+            name="conversation",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def submit(self, request: str) -> None:
+        self._requests.put(request)
+
+    def close(self) -> None:
+        if self._thread is None:
+            return
+        self._requests.put(None)
+        self._thread.join()
+        self._thread = None
+
+    def _run(self) -> None:
+        while True:
+            request = self._requests.get()
+            if request is None:
+                return
+            self._respond(request)
+
+    def _respond(self, user_request: str) -> None:
+        if not user_request:
+            self._voice.enqueue_acknowledgement()
+            return
+
+        with self._state.locked():
+            self._state.thinking = True
+        try:
+            prompt = build_prompt(self._config, self._state, user_request)
+            for clause in split_clauses(self._client.stream(prompt, self._config)):
+                with self._state.locked():
+                    self._state.thinking = False
+                self._voice.enqueue(clause)
+            self._update_mood(user_request)
+        except Exception as error:
+            self._event_log.append("conversation_error", {"error": str(error)})
+        finally:
+            with self._state.locked():
+                self._state.thinking = False
+
+    def _update_mood(self, transcript: str) -> None:
+        mood = self._client.classify_mood(transcript, set(self._moods), self._config)
+        if mood is None:
+            return
+        with self._state.locked():
+            if mood == self._state.mood:
+                return
+            previous_mood = self._state.mood
+            self._state.mood = mood
+            self._state.mood_until = time.time() + float(
+                self._moods[mood].get("decay", 0.0)
+            )
+        self._event_log.append(
+            "mood_changed", {"from": previous_mood, "to": mood}
+        )
 
 
 def _clause_end(text: str) -> int | None:

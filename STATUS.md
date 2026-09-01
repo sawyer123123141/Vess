@@ -2,6 +2,67 @@
 
 Update this at the end of every session. Newest at the top.
 
+## Step 4 done — local threaded voice loop and append-only event history
+
+Vess now runs the local path `microphone -> energy VAD -> CPU Whisper ->
+fuzzy wake gate -> Ollama -> Kokoro` without moving model, audio, database,
+or web work into the 30fps face loop. The microphone callback only queues
+16kHz mono blocks; a background audio worker segments utterances and sets
+`state.listening` only during transcription. It discards input while Vess is
+speaking, so interruption handling remains intentionally out of scope.
+
+### Voice behavior
+
+- Wake matching normalises punctuation/case and checks the first one, two, or
+  three words against configurable variants using Levenshtein distance. The
+  initial variants are `hey vess`, `hey best`, `hey guess`, and `heaviest`;
+  the threshold is 2 and all of it is in `config.json` for microphone tuning.
+- Every rejected transcript is retained as `wake_rejected` with its raw text,
+  tested prefix, closest variant, and edit distance. Accepted wakes receive
+  the same metadata and dispatch only the text after the matched prefix.
+- Empty accepted requests play the cached `Yeah?` acknowledgement. Other
+  requests use a single local Ollama worker, stream completed clauses to a
+  serial CPU Kokoro worker, and keep the face thinking until the first clause
+  is queued.
+- A valid classifier result changes `state.mood`, gives it that mood's decay,
+  and appends a `mood_changed` record. The main loop calls
+  `State.expire_mood()` each tick, which atomically makes expired state truly
+  neutral and logs the reverse transition.
+
+### Event history
+
+`brain/memory.py` provides only the deliberately minimal, append-only
+`events(timestamp, event_type, payload_json)` SQLite table. Writes have a
+dedicated background owner. A session start, wake accept/reject, both mood
+directions, and browser colour override set/reset are recorded. Querying,
+facts, retrieval, and summarisation remain Step 5 work.
+
+### Verification
+
+`python -m unittest discover -s tests -v` passes **22 tests**, covering VAD
+boundaries, fuzzy acceptance/rejection, queued SQLite persistence, clause
+streaming, serial speech, event instrumentation, colour history, and state
+expiry. `python -m compileall -q brain control output perception main.py
+state.py` exits cleanly.
+
+A bounded live `python main.py` run started the configured image detector,
+opened the browser preview (real `GET /frame.png` returned HTTP 200), loaded
+Kokoro, and wrote session/rejected-wake records. The production `OllamaClient`
+also streamed `Vess local model ready.` from the installed local `qwen2.5:7b`
+model. The exact USB microphone, a spoken accepted request, and audible
+speaker playback still need a physical in-room check; the event log will show
+which wake variants Whisper actually needs.
+
+### Known limitations, intentionally deferred
+
+- Step 4 transcribes every segmented utterance with Whisper on CPU, giving
+  continuous CPU load and roughly one second of wake latency. A dedicated
+  local wake-word engine such as openWakeWord is a later separate step, not
+  an addition to this loop.
+- There is no vision-model call at wake time: the current camera path has no
+  safe shared latest-frame handoff, and another GPU model conflicts with the
+  VRAM constraint. This remains an open later design task.
+
 ## Step 3 done — browser config UI with a live native preview
 
 `control/web.py` adds the local browser target. It joins the existing

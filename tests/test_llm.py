@@ -3,7 +3,7 @@
 import json
 import unittest
 
-from brain.llm import OllamaClient, build_prompt, split_clauses
+from brain.llm import ConversationWorker, OllamaClient, build_prompt, split_clauses
 from state import State
 
 
@@ -43,6 +43,32 @@ class LlmTests(unittest.TestCase):
             "num_predict": 80,
         })
 
+    def test_conversation_streams_clauses_and_logs_valid_mood_change(self) -> None:
+        state = State()
+        voice = RecordingVoice()
+        log = RecordingLog()
+        worker = ConversationWorker(
+            {"personas": {"friendly": "Warm."}},
+            {"neutral": {}, "annoyed": {"decay": 400}},
+            state,
+            log,
+            FakeClient(),
+            voice,
+        )
+
+        worker.start()
+        worker.submit("Tell me something")
+        worker.close()
+
+        self.assertEqual(voice.clauses, ["First,", "then second."])
+        self.assertEqual(state.mood, "annoyed")
+        self.assertGreater(state.mood_until, 0.0)
+        self.assertFalse(state.thinking)
+        self.assertEqual(
+            log.events,
+            [("mood_changed", {"from": "neutral", "to": "annoyed"})],
+        )
+
 
 class FakeResponse:
     def __init__(self, lines: list[bytes]) -> None:
@@ -53,6 +79,33 @@ class FakeResponse:
 
     def close(self) -> None:
         pass
+
+
+class FakeClient:
+    def stream(self, prompt: str, config: dict) -> list[str]:
+        return ["First, then second."]
+
+    def classify_mood(self, transcript: str, mood_names: set[str], config: dict) -> str:
+        return "annoyed"
+
+
+class RecordingVoice:
+    def __init__(self) -> None:
+        self.clauses: list[str] = []
+
+    def enqueue(self, text: str) -> None:
+        self.clauses.append(text)
+
+    def enqueue_acknowledgement(self) -> None:
+        self.clauses.append("Yeah?")
+
+
+class RecordingLog:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict[str, object]]] = []
+
+    def append(self, event_type: str, payload: dict[str, object]) -> None:
+        self.events.append((event_type, payload))
 
 
 if __name__ == "__main__":
