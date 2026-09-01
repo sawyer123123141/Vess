@@ -33,6 +33,22 @@ class PerformanceTests(unittest.TestCase):
         self.assertEqual(emphatic["movement"]["hold_scale"], 1.6)
         self.assertEqual(emphatic["movement"]["gaze_y_bias"], -0.35)
 
+    def test_malformed_numeric_values_fall_back_without_breaking_neutral(self) -> None:
+        definitions = load_performance_definitions({
+            "neutral": {
+                "intensity": "not-a-number",
+                "shape": {"l_h": None},
+                "movement": {"hold_scale": "oops"},
+            },
+            "playful": {"intensity": 0.65},
+        })
+
+        neutral = definitions["neutral"]
+        self.assertEqual(neutral["intensity"], 0.0)
+        self.assertEqual(neutral["shape"]["l_h"], 0.0)
+        self.assertEqual(neutral["movement"]["hold_scale"], 1.0)
+        self.assertEqual(cue_for_label("neutral", definitions), PerformanceCue())
+
     def test_missing_neutral_raises_clear_error(self) -> None:
         with self.assertRaisesRegex(ValueError, "neutral"):
             load_performance_definitions({"playful": {"intensity": 0.6}})
