@@ -28,6 +28,10 @@ _IDENTITY_PROMPT = (
     "two sentences."
 )
 
+_SOFT_CLAUSE_CHARS = 120
+_HARD_CLAUSE_CHARS = 180
+_MIN_COMMA_CLAUSE_CHARS = 60
+
 
 def build_prompt(
     config: dict[str, Any],
@@ -79,7 +83,7 @@ def build_prompt(
 
 
 def split_clauses(chunks: Iterable[str]) -> Iterator[str]:
-    """Yield complete speech clauses as Ollama response chunks arrive."""
+    """Yield natural speech clauses as Ollama response chunks arrive."""
     pending = ""
     for chunk in chunks:
         pending += chunk
@@ -415,6 +419,36 @@ def _request_key(value: str) -> str:
 
 
 def _clause_end(text: str) -> int | None:
-    ends = [text.find(character) for character in ",.!?\n"]
-    candidates = [end for end in ends if end >= 0]
+    """Choose a natural streamed speech boundary without letting buffers grow forever."""
+    strong = _first_index(text, ".!?\n")
+    if strong is not None and strong < _SOFT_CLAUSE_CHARS:
+        return strong
+
+    if len(text) >= _SOFT_CLAUSE_CHARS:
+        soft_limit = min(_SOFT_CLAUSE_CHARS, strong if strong is not None else len(text) - 1)
+        comma = text.rfind(",", _MIN_COMMA_CLAUSE_CHARS - 1, soft_limit + 1)
+        if comma >= _MIN_COMMA_CLAUSE_CHARS - 1:
+            return comma
+
+    if strong is not None and strong < _HARD_CLAUSE_CHARS:
+        return strong
+
+    if len(text) >= _HARD_CLAUSE_CHARS:
+        hard_limit = _HARD_CLAUSE_CHARS - 1
+        comma = text.rfind(",", _MIN_COMMA_CLAUSE_CHARS - 1, hard_limit + 1)
+        if comma >= _MIN_COMMA_CLAUSE_CHARS - 1:
+            return comma
+        whitespace = max(
+            text.rfind(" ", 0, _HARD_CLAUSE_CHARS),
+            text.rfind("\t", 0, _HARD_CLAUSE_CHARS),
+        )
+        if whitespace >= 0:
+            return whitespace
+
+    return strong
+
+
+def _first_index(text: str, characters: str) -> int | None:
+    positions = [text.find(character) for character in characters]
+    candidates = [position for position in positions if position >= 0]
     return min(candidates) if candidates else None
