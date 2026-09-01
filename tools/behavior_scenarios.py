@@ -321,7 +321,7 @@ def _eye_reaction_cycle(
         ("thoughtful", 0.8, thoughtful),
         ("sympathetic", 0.8, sympathetic),
         ("uncertain", 0.8, uncertain),
-        ("neutral_4", 0.8, neutral),
+        ("neutral_4", 0.6, neutral),
     )
     phases = tuple(
         ScenarioPhase(
