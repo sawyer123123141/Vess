@@ -145,11 +145,47 @@ class AudioLoopTests(unittest.TestCase):
 
         loop._stop.set()
         release_transcribe.set()
-        try:
-            loop._blocks.put_nowait(None)
-        except __import__("queue").Full:
-            pass
+        loop._blocks.put(None)
         worker.join(timeout=1.0)
+        if loop._transcribe_thread is not None:
+            loop._transcribe_thread.join(timeout=1.0)
+
+    def test_listening_tracks_live_vad_not_transcription(self) -> None:
+        state = State()
+        config = {
+            "audio": {
+                "sample_rate": 10,
+                "vad_threshold": 0.1,
+                "min_utterance_seconds": 0.1,
+                "silence_seconds": 0.3,
+                "max_utterance_seconds": 2.0,
+                "wake_variants": ["hey vess"],
+                "wake_max_distance": 2,
+            }
+        }
+        loop = AudioLoop(
+            config,
+            state,
+            RecordingLog(),
+            lambda _: None,
+            transcribe=lambda _: "turn on the lights",
+        )
+        worker = threading.Thread(target=loop._run, daemon=True)
+        worker.start()
+
+        loop._blocks.put(np.array([0.2, 0.2]))
+        time.sleep(0.05)
+        self.assertTrue(state.listening)
+
+        loop._blocks.put(np.zeros(3))
+        time.sleep(0.05)
+        self.assertFalse(state.listening)
+
+        loop._stop.set()
+        loop._blocks.put(None)
+        worker.join(timeout=1.0)
+        if loop._transcribe_thread is not None:
+            loop._transcribe_thread.join(timeout=1.0)
 
 
 class RecordingLog:
