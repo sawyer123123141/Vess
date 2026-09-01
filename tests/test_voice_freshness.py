@@ -320,26 +320,21 @@ class VoiceFreshnessTests(unittest.TestCase):
     def test_stale_queued_tts_is_skipped_when_generation_changes(self) -> None:
         first_play_started = threading.Event()
         release_first_play = threading.Event()
-        played: list[str] = []
+        played: list[int] = []
+
+        codes = {"old first": 1.0, "old second": 2.0, "new answer": 3.0}
 
         def synthesize(text: str) -> np.ndarray:
-            return np.array([1.0], dtype=np.float32)
-
-        current_text = {"value": ""}
+            return np.array([codes[text]], dtype=np.float32)
 
         def play(audio: np.ndarray, sample_rate: int) -> None:
-            played.append(current_text["value"])
+            played.append(int(audio[0]))
             if len(played) == 1:
                 first_play_started.set()
                 release_first_play.wait(timeout=1.0)
 
-        class TrackingVoice(VoiceOutput):
-            def _speak(self, text: str, generation_id: int | None = None) -> None:
-                current_text["value"] = text
-                super()._speak(text, generation_id=generation_id)
-
         state = State()
-        voice = TrackingVoice(
+        voice = VoiceOutput(
             {"voice": {"sample_rate": 24_000}},
             state,
             RecordingLog(),
@@ -356,7 +351,7 @@ class VoiceFreshnessTests(unittest.TestCase):
         release_first_play.set()
         voice.close()
 
-        self.assertEqual(played, ["old first", "new answer"])
+        self.assertEqual(played, [1, 3])
         self.assertIn(
             "stale_tts_skipped",
             [event["event"] for event in state.debug_snapshot()["events"]],
