@@ -10,45 +10,33 @@ The intended interaction is:
 
 1. Vess is speaking.
 2. The microphone remains active.
-3. Credible near-end speech appears while speaker playback is active.
+3. Credible near-end human speech appears despite speaker playback.
 4. Vess pauses quickly, before waiting for Whisper.
-5. The overlapping human utterance continues to be captured.
-6. If a real transcript arrives, the interruption is committed: the old response is cancelled and the transcript becomes the newest intent.
-7. If no real utterance materializes, the interruption is rolled back: the same waveform resumes from its saved position.
-8. Short-term memory records delivery state, not merely whatever text the LLM happened to generate.
+5. The overlapping utterance continues to be captured.
+6. A real transcript commits the interruption and becomes the newest intent.
+7. A false candidate rolls back and resumes the same waveform.
+8. Conversation memory records delivery state, not merely generated text.
 
 The feature must preserve the independent 30 FPS face loop, newest-intent semantics, one-clause-ahead TTS bound, and local-only architecture.
 
 ## Non-Goals
 
-This design does not add:
+This design does not add a new LLM, long-term memory, a learned interruption classifier, a mandatory echo-canceller chosen without hardware testing, multi-speaker diarization, semantic backchannel classification, intentional full-duplex talking-over, word-level TTS alignment, planner work, or proactive-behavior work.
 
-- a new LLM
-- long-term memory
-- a mandatory learned interruption classifier
-- a hard-coded choice of acoustic echo canceller before hardware testing
-- multi-speaker diarization
-- semantic backchannel classification
-- full-duplex behavior where Vess intentionally continues talking over a person
-- word-level TTS/audio alignment
-- planner or proactive-behavior work
-
-## Existing Problems to Fix
+## Existing Problems
 
 The current implementation has four relevant limitations:
 
 1. `AudioLoop` discards microphone blocks whenever `state.speaking` is true.
 2. `VoiceOutput` can skip stale queued/prepared speech but cannot stop a waveform already playing.
-3. `ConversationWorker.submit()` both creates a new request and invalidates older generations; there is no separate cancel-without-submit operation.
-4. Conversation memory is finalized from generated clauses before physical playback is known to have completed.
+3. `ConversationWorker.submit()` both creates a new request and invalidates older generations; there is no generation-specific cancel-without-submit operation.
+4. Conversation memory is finalized from generated clauses before physical playback completion is known.
 
-Barge-in must correct those four things without turning the runtime into one giant synchronous voice loop.
+Barge-in must correct those four things without turning the runtime into one synchronous voice loop.
 
 ---
 
 ## 1. Core Architecture
-
-The runtime remains asynchronous and event-driven.
 
 ```text
 AudioPlayer -----------------------> RenderReference
@@ -78,24 +66,20 @@ microphone -> CapturedAudioBlock -> CapturePreprocessor
 
 Responsibilities stay narrow:
 
-- **CapturePreprocessor** handles capture cleanup/echo-reduction plumbing.
-- **InterruptionDetector** answers whether credible near-end speech has persisted long enough to justify a reversible pause.
-- **TurnCoordinator** owns pause/commit/rollback policy.
-- **AudioPlayer** owns physical output, cursor state, pausing, resuming, and render reference.
-- **VoiceOutput** owns TTS ordering, clause lifecycle, generation freshness, and performance cues.
+- **CapturePreprocessor** owns capture cleanup/echo-reference plumbing.
+- **InterruptionDetector** decides when credible near-end speech justifies a reversible pause.
+- **TurnCoordinator** owns pause/commit/rollback policy and timers.
+- **AudioPlayer** owns physical output, cursor state, pause/resume, and render reference.
+- **VoiceOutput** owns TTS ordering, clause lifecycle, freshness, and performance cues.
 - **ConversationWorker** owns user requests, LLM generations, and conversation-turn lifecycle.
-
-No one component gets to quietly become the whole assistant because software apparently enjoys recreating governments.
 
 ---
 
-## 2. Always-Live Capture When Barge-In Is Enabled
+## 2. Always-Live Capture When Enabled
 
 When `barge_in.enabled` is true, `AudioLoop` must not discard microphone blocks merely because Vess is speaking.
 
 The sounddevice input callback remains minimal and non-blocking. It copies samples into the existing bounded capture queue and preserves timing metadata when available.
-
-Use a value such as:
 
 ```python
 @dataclass(frozen=True)
@@ -107,15 +91,15 @@ class CapturedAudioBlock:
 
 `adc_time` is retained for future echo-path/delay work and diagnostics. Tests may use `None`.
 
-When barge-in is disabled, the current conservative behavior may remain: microphone data during Vess speech may be ignored. This preserves current behavior until hardware acceptance is complete.
+When barge-in is disabled, current speaker-time microphone behavior may remain unchanged. This preserves existing behavior until hardware acceptance.
 
 ---
 
 ## 3. Capture Preprocessing and Render Reference
 
-Speaker output can return through the microphone and look like human speech to an ordinary VAD. Raw VAD alone is therefore not a production barge-in solution for speaker use.
+Speaker output can return through the microphone and appear as speech to ordinary VAD. Raw VAD alone is therefore not a production barge-in solution for speaker use.
 
-Introduce an explicit render-aware preprocessing contract:
+Use an explicit render-aware contract:
 
 ```python
 @dataclass(frozen=True)
@@ -138,26 +122,26 @@ A future real backend may use WebRTC AEC3 or another local echo-cancellation imp
 
 Requirements:
 
-- no network service is required
+- no network service
 - no mandatory CUDA dependency
-- no heavy DSP, file I/O, model inference, database writes, or ordinary blocking work occurs in the real-time audio callback
-- preprocessing failure is visible in diagnostics
-- if configured to fail closed, preprocessing failure disables live barge-in for the session rather than treating raw self-echo as trustworthy speech
-- speaker-mode barge-in is not production-ready until real self-echo testing passes
+- no heavy DSP, file I/O, model inference, database writes, or unpredictable blocking work in real-time audio callbacks
+- preprocessing failure is visible
+- with fail-closed policy, preprocessing failure disables speaker-time barge-in for the session rather than trusting raw self-echo
+- speaker-mode barge-in is not production-ready until real self-echo tests pass
 
-The first implementation may provide the contract and passthrough backend only. `barge_in.enabled` remains false by default.
+The first implementation may provide only the contract plus passthrough backend. `barge_in.enabled` remains false by default.
 
 ---
 
-## 4. Interruption Detection Uses a Fast Reversible Pause Threshold
+## 4. Fast Reversible Interruption Detection
 
-`InterruptionDetector` answers one question:
+`InterruptionDetector` answers:
 
 > Has credible preprocessed near-end speech persisted long enough to justify temporarily pausing Vess?
 
-It does not know about prompts, LLM generations, TTS queues, or memory.
+It knows nothing about prompts, LLM generations, TTS queues, or memory.
 
-Because the first action is **reversible pause**, not permanent cancellation, the pause threshold can be faster than a traditional commit threshold.
+Because the first action is reversible pause rather than permanent cancellation, the pause threshold can be shorter than a traditional interruption-commit threshold.
 
 Initial configurable value:
 
@@ -165,72 +149,74 @@ Initial configurable value:
 pause_after_speech_seconds = 0.25
 ```
 
-This is intentionally aligned with the existing minimum utterance scale rather than using 0.5 seconds as the audible pause delay. Hardware acceptance may move it higher or lower.
+This is a starting value, not a hardware-tuned constant.
 
-A single short block or instantaneous spike must not trigger pause. A candidate is emitted only after the configured continuous/sustained speech duration is met.
+A single block or instantaneous spike cannot trigger pause. A candidate is emitted only after sustained accepted speech reaches the configured duration.
 
-A candidate never becomes text and never directly creates a conversation generation.
+A candidate never becomes text and never creates a generation.
 
 ---
 
 ## 5. Two-Phase Interruption Protocol
 
-An acoustic candidate pauses speech quickly but does not immediately destroy the current response.
-
 ### Phase A: Reversible Pause
 
-On the first candidate for the currently audible generation:
+On the first candidate for currently audible speech:
 
-1. `TurnCoordinator` marks an interruption pending.
-2. `VoiceOutput.pause_for_interruption()` requests immediate physical output abort and saves resumable playback state.
-3. The current LLM generation remains current.
-4. Playback is gated so the worker cannot advance to the next clause while pending.
-5. The existing one-waveform-ahead synthesis bound remains in force, so pause cannot create an unbounded TTS backlog.
-6. Capture continues until the overlapping human utterance ends.
-7. `state.speaking` becomes false only after physical audio is actually paused.
-8. `state.listening` becomes true for the accepted candidate.
-9. Transient performance clears to neutral while no audio is physically playing.
+1. `TurnCoordinator` enters pending state.
+2. `VoiceOutput.pause_for_interruption()` requests immediate output abort.
+3. The returned pause receipt identifies the exact audible generation and saves resumable playback position.
+4. `TurnCoordinator` stores that `paused_generation` as the only generation this interruption is allowed to commit against.
+5. The LLM generation is **not cancelled yet**.
+6. Playback cannot advance to later clauses while pending.
+7. Existing one-waveform-ahead synthesis remains bounded.
+8. Capture continues until the overlapping human utterance ends.
+9. `state.speaking` becomes false only after physical audio is paused.
+10. `state.listening` becomes true for the accepted candidate.
+11. Transient performance clears while no sound is playing.
 
-Duplicate candidate notifications while already pending are idempotent.
+Duplicate candidate notifications are idempotent.
 
-### Phase B1: Commit a Real Interruption
+### Phase B1: Commit Real Interruption
 
-A real interruption is committed when the captured utterance returns a non-empty accepted transcript.
+A non-empty accepted transcript commits the interruption.
 
 Commit order:
 
-1. `ConversationWorker.cancel_active_response(reason="barge_in")` advances the freshness generation without inventing a user request.
-2. `VoiceOutput.commit_interruption(old_generation)` permanently discards the saved remainder and lets freshness discard queued/prepared work from that old generation.
-3. The transcript is submitted normally, allocating a newer generation.
-4. Existing newest-intent rules continue to handle any request that races with the barge-in transcript.
+1. `ConversationWorker.cancel_generation(paused_generation, reason="barge_in")` attempts to invalidate **only** the generation that was paused.
+2. `VoiceOutput.commit_interruption(paused_generation)` permanently discards that generation's saved remainder and lets freshness discard its queued/prepared work.
+3. The transcript is submitted normally, allocating a new generation.
+4. Existing newest-intent rules handle any later race.
 
-The cancel token is monotonic. Generation identifiers are never reused or decremented.
+`cancel_generation()` is compare-and-cancel behavior. If `paused_generation` is already stale because another request arrived first, it must not cancel the newer generation. It simply reports that the expected generation was no longer current.
 
-True immediate cancellation of Ollama's underlying inference process is not required for V1. The old stream must stop contributing clauses as soon as the worker observes stale generation state, and the HTTP response must close promptly afterward.
+Generation identifiers remain monotonic and are never reused.
 
-### Phase B2: Roll Back a False Interruption
+Immediate cancellation of Ollama's underlying inference process is not required in V1. An old stream stops contributing clauses as soon as it observes stale generation state and closes its response promptly afterward.
 
-If the candidate does not produce a real transcript:
+### Phase B2: Roll Back False Interruption
 
-1. no cancellation generation is created
-2. no synthetic user request is submitted
-3. the original generation remains current
-4. `VoiceOutput.resume_after_false_interruption()` resumes the same waveform from its saved playback position
-5. the original performance cue becomes active again only when resumed audio physically starts
-6. normal subsequent clauses from that same generation may continue
-7. the false interruption is recorded diagnostically
+If no real transcript materializes:
 
-If any newer generation appeared while paused, rollback is forbidden and the old paused waveform is discarded.
+1. no generation cancellation occurs
+2. no synthetic request is created
+3. the original generation remains current unless independently superseded
+4. `VoiceOutput.resume_after_false_interruption(paused_generation)` resumes the saved waveform only if that same generation is still current
+5. original performance returns only when resumed audio physically starts
+6. normal subsequent clauses from that generation may continue
+7. the false interruption is recorded
 
-V1 does not semantically classify utterances like "mhm", "right", or "okay" as backchannels. A non-empty accepted transcript is a real user turn. Backchannel policy comes later only if actual data shows it matters.
+If any newer generation appeared while paused, rollback is forbidden and the old waveform is discarded.
+
+V1 does not semantically classify "mhm", "right", "okay", etc. as backchannels. A non-empty accepted transcript is treated as a real user turn. Backchannel policy comes later only if actual data justifies it.
 
 ---
 
 ## 6. False-Interruption Timing Must Not Race Whisper
 
-The false-interruption timer must never resume Vess merely because local transcription is taking longer than expected.
+A timer must never resume Vess merely because local transcription is legitimately taking longer than expected.
 
-The pending interruption has internal decision phases:
+Pending interruption has internal decision phases:
 
 ```text
 CAPTURING -> TRANSCRIBING -> DECIDED
@@ -238,39 +224,36 @@ CAPTURING -> TRANSCRIBING -> DECIDED
 
 Rules:
 
-- While overlapping speech is still being assembled, rollback is not allowed.
-- Once an utterance has been queued for transcription, the ordinary false-silence timer is suspended.
-- A non-empty transcript commits.
-- An empty transcript or explicit transcription failure rolls back if the original generation is still current.
-- A bounded decision watchdog prevents a broken transcriber from leaving Vess paused forever.
+- no rollback while overlapping speech is still being assembled
+- once a valid utterance is queued for transcription, ordinary false-silence timeout is suspended
+- non-empty transcript commits
+- empty transcript or explicit transcription failure rolls back if the paused generation is still current
+- a bounded watchdog prevents a broken transcriber from leaving Vess paused forever
 
-Initial configurable values:
+Initial values:
 
 ```text
 false_interruption_timeout_seconds = 2.0
 max_interruption_decision_seconds = 5.0
 ```
 
-`false_interruption_timeout_seconds` applies to a candidate that ends without entering a valid transcription decision. `max_interruption_decision_seconds` bounds the period after speech end while a transcription decision is pending.
+The false timeout covers a candidate that ends without entering a valid transcription decision. The decision watchdog bounds the period after speech end while transcription is in flight.
 
-If the decision watchdog expires, record an error and roll back only if the original generation is still current. Otherwise discard the old paused response.
-
-These are starting values, not hardware-tuned constants.
+On watchdog expiry: record error and roll back only if the paused generation remains current; otherwise discard the old paused response.
 
 ---
 
 ## 7. Streaming Cancellable `AudioPlayer`
 
-The existing high-level `sounddevice.play()` / `wait()` helper hides the state required for fast abort, resume, and render-reference publication.
+The existing high-level `sounddevice.play()` / `wait()` helper hides state needed for fast abort, resume, and render reference.
 
-Introduce an `AudioPlayer` abstraction owned by `VoiceOutput`.
-
-Conceptual values:
+Introduce an `AudioPlayer` owned by `VoiceOutput`.
 
 ```python
 @dataclass(frozen=True)
 class PlaybackReceipt:
     status: str  # completed | paused | interrupted | error
+    generation_id: int | None
     frames_started: int
     frames_completed: int
     total_frames: int
@@ -281,7 +264,12 @@ Conceptual interface:
 
 ```python
 class AudioPlayer(Protocol):
-    def play(self, audio: np.ndarray, sample_rate: int) -> PlaybackReceipt:
+    def play(
+        self,
+        audio: np.ndarray,
+        sample_rate: int,
+        generation_id: int | None,
+    ) -> PlaybackReceipt:
         ...
 
     def pause_for_interruption(self) -> PlaybackReceipt | None:
@@ -294,111 +282,117 @@ class AudioPlayer(Protocol):
         ...
 ```
 
-`play()` may block the dedicated playback worker while the device plays, but `pause_for_interruption()` must be safe to invoke from another worker.
+`play()` may block the dedicated playback worker. `pause_for_interruption()` must be safe from another worker.
 
-The production implementation uses stream-level sounddevice/PortAudio output. Interruption uses immediate **abort** semantics rather than ordinary graceful stop semantics that may wait for pending device buffers.
+The production implementation uses stream-level sounddevice/PortAudio output. Barge-in uses immediate **abort** semantics rather than graceful stop semantics that may wait for queued device buffers.
 
-The player owns:
+The player owns current waveform, sample rate, generation identity, cursor/completed-frame estimate, paused remainder, and render-reference publication.
 
-- current waveform
-- sample rate
-- current playback identity
-- playback cursor/completed-frame estimate
-- paused remainder
-- render-reference publication
+A tiny replay overlap is preferable to skipping speech if device buffering makes the exact audible cursor uncertain. Target-PC testing decides whether overlap is necessary.
 
-A small replay overlap at resume is preferable to skipping speech if device buffering makes the exact audible cursor uncertain. Target-PC tests determine whether such a safety overlap is necessary.
-
-The real-time callback remains extremely small. It must not call the LLM, TTS, SQLite, event logging, file I/O, or unpredictable blocking code.
+The real-time callback cannot call LLM/TTS/SQLite/event logging/file I/O or unpredictable blocking code.
 
 ---
 
-## 8. `VoiceOutput` Interruption Behavior
-
-Add explicit operations:
-
-```python
-pause_for_interruption()
-commit_interruption(generation_id)
-resume_after_false_interruption()
-finish_generation(generation_id)
-```
-
-### `pause_for_interruption()`
-
-- idempotent
-- affects only currently audible playback
-- asks `AudioPlayer` to abort/pause
-- records pause request and physical pause timing
-- stops playback progression to later clauses while pending
-- clears active performance only after the waveform is physically paused
-
-### `commit_interruption(generation_id)`
-
-- permanently discards paused remainder for that generation
-- never resumes stale audio
-- lets normal generation freshness reject queued/prepared old work
-
-### `resume_after_false_interruption()`
-
-- legal only when an interruption is pending
-- verifies the paused generation is still current
-- resumes the same synthesized waveform rather than synthesizing it again
-- reactivates its original `PerformanceCue` at physical resumed playback start
-- reopens playback progression for subsequent clauses
-
-### `finish_generation(generation_id)`
-
-`ConversationWorker` calls this only after the LLM stream has ended and every clause for that generation has been enqueued.
-
-`VoiceOutput` must preserve the marker's ordering through synthesis/playback so it can emit `generation_playback_drained` only after every earlier playable clause has either completed or been explicitly abandoned.
-
-This end marker is required for truthful memory finalization. LLM completion alone is not playback completion.
-
-The one-ready-waveform-ahead bound remains unchanged.
-
----
-
-## 9. Conversation Cancellation Without Submission
+## 8. `VoiceOutput` Interruption and Drain Behavior
 
 Add:
 
 ```python
-ConversationWorker.cancel_active_response(reason: str)
+pause_for_interruption()
+commit_interruption(generation_id)
+resume_after_false_interruption(generation_id)
+finish_generation(generation_id)
 ```
 
-It must:
+### Pause
 
-- atomically advance the latest-generation token
-- make the active old generation stale
-- not enqueue an empty or fake request
-- preserve any already pending newer request correctly
-- record cancellation reason and old/new generation identifiers
-- be safe and idempotent when there is nothing active to cancel
+`pause_for_interruption()`:
 
-A later `submit(transcript)` allocates another newer generation normally.
+- is idempotent
+- pauses only current audible playback
+- returns the paused generation identity
+- records pause timing and cursor
+- prevents playback progression while pending
+- clears active performance only after physical pause
 
-Cancellation and submission remain separate because commit should first make the old generation impossible to speak, then submit the replacement user intent. Under the two-phase protocol, neither happens on the initial reversible pause.
+### Commit
+
+`commit_interruption(generation_id)`:
+
+- permanently discards paused remainder only for the supplied generation
+- never resumes stale audio
+- relies on normal freshness for queued/prepared stale work
+
+### Resume
+
+`resume_after_false_interruption(generation_id)`:
+
+- verifies pending generation identity and freshness
+- resumes the same waveform rather than resynthesizing
+- restores original performance only at physical resumed playback start
+- then reopens progression to later clauses
+
+### Generation drain marker
+
+After the LLM stream ends and all clauses are enqueued, `ConversationWorker` calls:
+
+```python
+voice.finish_generation(generation_id)
+```
+
+The marker must preserve ordering through synthesis/playback. `generation_playback_drained` occurs only after every preceding playable clause has completed or been explicitly abandoned.
+
+LLM completion alone is not playback completion.
+
+The existing one-ready-waveform-ahead bound remains unchanged.
+
+---
+
+## 9. Generation-Specific Conversation Cancellation
+
+Add:
+
+```python
+ConversationWorker.cancel_generation(
+    expected_generation: int,
+    reason: str,
+) -> bool
+```
+
+It must atomically:
+
+- compare `expected_generation` with the currently valid generation
+- advance freshness only when they match
+- make that expected generation stale
+- never cancel a generation that appeared later
+- not enqueue an empty/fake request
+- preserve already pending newer requests
+- record cancellation reason and old/new IDs
+- return whether the expected generation was actually cancelled
+- be idempotent if the expected generation is already stale
+
+A later `submit(transcript)` allocates another generation normally.
+
+This compare-and-cancel rule is essential: a delayed barge-in decision may never destroy a newer request that arrived during the pause window.
 
 ---
 
 ## 10. Delivery-Aware Conversation Memory
 
-Generated text is not equivalent to delivered text.
+Generated text is not delivered text.
 
-Replace the current "remember generated clauses when LLM streaming finishes" rule with a generation-scoped delivery ledger.
-
-Each generation tracks:
+Replace "remember generated clauses at LLM completion" with a generation-scoped delivery ledger containing:
 
 - user request
 - generated clauses
-- clauses whose physical playback completed
-- currently paused/interrupted clause, if any
-- whether LLM generation ended
-- whether playback drained
-- final delivery status: completed or interrupted
+- fully completed playback clauses
+- paused/interrupted clause, if any
+- LLM-finished flag
+- playback-drained flag
+- final status: completed or interrupted
 
-Extend the short-term turn value:
+Extend short-term turns:
 
 ```python
 @dataclass(frozen=True)
@@ -412,23 +406,22 @@ class ConversationTurn:
 
 ### Normal completion
 
-The turn is finalized only after:
+Finalize only after both:
 
-1. LLM generation ended
-2. `finish_generation(generation_id)` entered the voice pipeline
-3. the corresponding playback-drained marker is reached
+- LLM generation has ended and sent `finish_generation`
+- corresponding playback-drained marker has been reached
 
-`assistant` contains clauses whose playback fully completed.
+`assistant` contains fully completed speech.
 
 ### Real interruption
 
-Finalize the old turn as `interrupted` when the interruption commits.
+Finalize the paused old generation as `interrupted` when commit occurs.
 
 - `assistant` contains only fully completed clauses
-- `interrupted_clause` may contain the full text of the clause that had started but did not complete
-- prompt construction must explicitly treat `interrupted_clause` as partially delivered and must not assume the user heard the whole thing
+- `interrupted_clause` may contain the full text of the clause that started but did not complete
+- prompt construction must not assume the whole interrupted clause was heard
 
-If no assistant clause completed, retain the prior user request anyway with `assistant=""` and `status="interrupted"`. A user question must not disappear merely because Vess was interrupted before finishing its first clause.
+If no clause completed, retain the user request with `assistant=""` and interrupted status. The previous user question must not disappear simply because Vess was cut off early.
 
 Prompt rendering may use:
 
@@ -438,26 +431,26 @@ Vess (interrupted): <fully completed speech, if any>
 Vess had started another clause but was interrupted; do not assume the user heard all of it.
 ```
 
-No word-level claim is made about the partially heard clause.
+No word-level claim is made about the partial clause.
 
-### Required playback lifecycle receipts
+### Required generation-scoped receipts
 
-Generation-scoped internal receipts distinguish:
+Track:
 
 - clause playback started
-- clause playback completed
-- clause paused for candidate interruption
+- clause completed
+- clause paused
 - clause resumed
-- clause abandoned on committed interruption
+- clause abandoned on commit
 - generation playback drained
 
-Stale receipts cannot finalize memory for a newer generation.
+Late/stale receipts from a finalized generation are ignored and cannot mutate newer memory.
 
 ---
 
 ## 11. `TurnCoordinator`
 
-Introduce one small coordinator for interruption policy.
+Introduce one small policy coordinator.
 
 Public conceptual states:
 
@@ -467,45 +460,48 @@ AGENT_SPEAKING
 INTERRUPTION_PENDING
 ```
 
-The pending state internally knows whether it is capturing, transcribing, or awaiting decision.
+Pending state also stores:
+
+- `paused_generation`
+- candidate timestamps
+- current decision phase: capturing/transcribing
+- watchdog/false-timeout state
 
 Transitions:
 
 ```text
 IDLE -> AGENT_SPEAKING
-    physical Vess playback starts
+    physical playback starts
 
 AGENT_SPEAKING -> INTERRUPTION_PENDING
-    detector emits first credible sustained-speech candidate
+    detector emits first credible candidate
 
 INTERRUPTION_PENDING -> IDLE/user-turn flow
-    non-empty transcript commits interruption
+    non-empty transcript commits
 
 INTERRUPTION_PENDING -> AGENT_SPEAKING
-    false decision rolls back and same generation remains current
+    false decision and paused generation still current
 
 INTERRUPTION_PENDING -> IDLE
-    false decision occurs but a newer generation already superseded the paused one
+    false decision but paused generation already stale
 ```
 
 The coordinator:
 
-- makes duplicate candidate/commit/rollback events harmless
-- never holds `State.lock` while calling potentially blocking audio, transcription, TTS, or conversation methods
-- owns timer/watchdog state
-- does not perform acoustic processing itself
-- does not construct prompts or mutate memory directly
+- makes duplicate candidate/commit/rollback harmless
+- never holds `State.lock` while calling blocking audio/transcription/TTS/conversation methods
+- does not perform DSP
+- does not build prompts or mutate memory directly
 
 ---
 
 ## 12. Runtime State Semantics
 
-`State` remains the authoritative public runtime state.
+`State` remains authoritative public runtime state.
 
-Important distinction:
+`state.listening` means meaningful accepted human speech activity, not raw microphone energy.
 
-- `state.listening` means Vess is meaningfully attending to an accepted human speech candidate/turn
-- raw microphone energy or raw VAD during speaker playback is diagnostic only
+Raw VAD/self-echo during speaker playback stays diagnostic until preprocessing/detection accepts it.
 
 During pending interruption after physical pause:
 
@@ -517,71 +513,64 @@ performance = neutral
 
 On false rollback:
 
-- `listening` becomes false before resumed speech takes over
-- `speaking` becomes true only when resumed sound physically starts
-- original performance returns at that same physical start
+- listening clears
+- speaking becomes true only when resumed sound physically starts
+- original performance returns at the same start point
 
-This preserves the face's existing listening/speaking priority without letting self-echo make the eyes behave as though a person spoke.
+This preserves current face priority behavior.
 
 ---
 
 ## 13. Wake and Follow-Up Semantics
 
-A committed barge-in transcript is part of the already active conversation and does not require the wake phrase.
+A committed barge-in transcript is automatically part of the active conversation and does not require a wake phrase.
 
-Idle behavior remains unchanged:
+When idle, existing wake/follow-up behavior is unchanged.
 
-- wake matching still applies when conversation is inactive
-- normal follow-ups use the current conversation timeout
-
-The acoustic candidate never becomes text and never submits a request by itself.
+The acoustic candidate never becomes text and never submits a request.
 
 ---
 
 ## 14. Error Handling
 
-### Audio player cannot pause/abort
+### Player cannot pause/abort
 
 - record `barge_in_pause_error`
 - do not claim physical pause succeeded
-- keep capturing the user's utterance
-- if a real transcript arrives, commit cancellation so no additional stale clauses begin after current blocking playback eventually returns
+- keep capturing the utterance
+- if real transcript arrives, compare-and-cancel the expected old generation so no later stale clauses start after current playback returns
 
-### Capture preprocessor fails
+### Preprocessor fails
 
 - record `barge_in_preprocessor_error`
-- when `disable_on_preprocessor_error=true`, disable speaker-time barge-in for the session
-- retain ordinary idle microphone handling if raw capture itself still works
+- if `disable_on_preprocessor_error=true`, disable speaker-time barge-in for the session
+- ordinary idle capture may continue if raw microphone still works
 
-### Transcription returns empty
+### Empty transcript
 
-- roll back if original generation is still current
-- otherwise discard old paused waveform
+- roll back only if paused generation remains current
+- otherwise discard old paused state
 
-### Transcription raises or decision watchdog expires
+### Transcription error/watchdog expiry
 
-- record the error/timeout
-- roll back if the original generation is still current
+- record error/timeout
+- roll back only if paused generation remains current
 - otherwise discard
-- never fabricate transcript text
+- never fabricate text
 
-### A newer request arrives while interruption is pending
+### New request during pending interruption
 
-Newest intent wins. The old waveform may never resume after a newer generation exists.
+Newest intent wins. Compare-and-cancel may not cancel that newer generation, and the old paused waveform may never resume.
 
 ### Shutdown while paused
 
-- abort/close player
-- discard paused remainder
-- clear speaking/listening/performance state
-- cancel timers/watchdogs
-- do not wait for false-interruption timeout
+Abort/close player, discard paused state, clear speaking/listening/performance, cancel timers, and do not wait for false timeout.
 
 ---
 
 ## 15. Configuration
 
-Add conservative, explicitly non-final defaults:
+Initial non-final defaults:
 
 ```json
 {
@@ -596,46 +585,47 @@ Add conservative, explicitly non-final defaults:
 }
 ```
 
-`enabled` remains false until target-PC acceptance proves the chosen preprocessing path prevents self-echo interruption with the actual speakers and microphone.
+Barge-in stays disabled by default until target-PC tests prove self-echo rejection with the actual microphone and speakers.
 
 ---
 
 ## 16. Diagnostics and Metrics
 
-Record generation-scoped timestamps/events for:
+Record generation-scoped events/timestamps for:
 
-- credible speech candidate start
+- credible candidate start
 - pause requested
-- physical audio paused
+- physical pause
 - speech-start-to-pause latency
-- playback frame/cursor at pause
-- interruption pending phase changes
-- transcript start/finish
-- interruption committed
-- false interruption
+- paused generation and cursor
+- pending phase changes
+- transcription start/finish
+- commit/rollback result
+- compare-and-cancel success/failure
 - resumed playback start
-- stale clauses discarded after commit
+- stale clauses discarded
 - interrupted clause metadata
-- new response first-clause latency after barge-in
-- preprocessor/AEC failure
-- player abort failure
+- new-response first-clause latency
+- preprocessor error
+- player abort error
 
 Target-PC metrics:
 
-- p50/p95 human-speech-start -> audible Vess pause
+- p50/p95 human-speech-start -> audible pause
 - real interruption detection rate
 - missed interruption rate
-- false interruptions per hour
-- self-echo interruptions per hour
-- false-interruption resume success rate
-- stale clauses audibly played after commit
-- completed-but-unheard clauses falsely stored as delivered
+- false interruptions/hour
+- self-echo interruptions/hour
+- false-resume success rate
+- stale clauses played after commit
+- never-completed clauses incorrectly stored as fully delivered
 
-Two hard production targets remain exact:
+Hard production targets:
 
 ```text
 stale clauses played after committed interruption = 0
 never-completed clauses recorded as fully delivered = 0
+newer generation cancelled by delayed old interruption = 0
 ```
 
 ---
@@ -644,38 +634,32 @@ never-completed clauses recorded as fully delivered = 0
 
 Deterministic tests must prove:
 
-1. A committed interruption makes the old generation stale before the replacement request is submitted.
-2. No stale prepared clause starts physical playback after commit.
-3. Reversible pause alone does not cancel the LLM generation.
-4. False rollback can resume only the same still-current generation.
-5. Any newer generation permanently forbids old paused-waveform resume.
-6. Active performance is neutral while physical playback is paused.
-7. Original performance returns only when resumed physical playback starts.
-8. Raw speaker echo/VAD alone cannot set meaningful listening state unless preprocessing/detection accepts a candidate.
-9. LLM-generated but never completed clauses are never marked fully delivered.
-10. Interrupted turns remain present in short-term context.
-11. Duplicate candidate/commit/rollback/cancel operations are idempotent.
-12. Playback, capture, synthesis, transcription, conversation, and rendering remain independent workers.
-13. Barge-in queues remain bounded; paused playback cannot create unbounded synthesized-audio backlog.
-14. False-interruption rollback cannot fire while a valid transcription decision is actively in flight, except through the explicit bounded watchdog path.
-15. The generation-drained marker cannot overtake preceding speech.
-16. Barge-in disabled preserves current idle/wake/follow-up behavior.
-17. The 30 FPS face loop never waits on barge-in work.
+1. Commit compare-and-cancels only the exact paused generation.
+2. A newer generation can never be cancelled by a delayed old interruption.
+3. No stale prepared clause starts playback after committed cancellation.
+4. Reversible pause alone does not cancel the LLM generation.
+5. False rollback resumes only the same still-current generation.
+6. Any newer generation permanently forbids old paused-waveform resume.
+7. Performance is neutral while physical playback is paused.
+8. Original performance returns only at resumed physical playback start.
+9. Raw speaker echo/VAD alone cannot become meaningful listening state without candidate acceptance.
+10. Generated but never completed clauses are never marked fully delivered.
+11. Interrupted turns remain in short-term context.
+12. Duplicate candidate/commit/rollback/cancel operations are idempotent.
+13. Barge-in queues remain bounded during pause.
+14. False rollback cannot fire while a valid transcription decision is in flight except via explicit watchdog expiry.
+15. Generation-drained marker cannot overtake preceding speech.
+16. Late receipts cannot mutate finalized or newer turns.
+17. Barge-in disabled preserves existing idle/wake/follow-up behavior.
+18. The 30 FPS face loop never waits on barge-in work.
 
 ---
 
 ## 18. Remote Test Strategy
 
-CI tests use no microphone hardware, speakers, Ollama, Whisper model, real TTS model, or CUDA.
+CI uses no real microphone, speakers, Ollama, Whisper model, TTS model, or CUDA.
 
-Use deterministic fakes for:
-
-- `AudioPlayer`
-- capture preprocessor
-- transcriber
-- TTS engine
-- LLM stream
-- clocks/timers where timing matters
+Use deterministic fakes for AudioPlayer, preprocessor, transcriber, TTS engine, LLM stream, and clocks/timers.
 
 Required scenarios:
 
@@ -684,113 +668,92 @@ Required scenarios:
 ```text
 playback starts
 candidate threshold reached
-player pauses
-human utterance finishes
-transcription starts
-non-empty transcript arrives
-old generation is cancelled
-paused remainder is committed/discarded
+player pauses and returns generation G
+utterance transcribes non-empty
+cancel_generation(G) succeeds
+paused G audio commits/discards
 new transcript is submitted
-old prepared/queued clauses never play
-old memory turn finalizes interrupted
+old G queued/prepared speech never plays
+old turn finalizes interrupted
 ```
 
 ### False interruption before transcription
 
 ```text
-playback starts
-candidate threshold reached
-player pauses
+player pauses G
 candidate collapses without valid utterance
 false timeout expires
+G still current
 same waveform resumes
-same generation remains current
 ```
 
-### Empty transcript after valid captured utterance
+### Empty transcript
 
-```text
-player pauses
-utterance is transcribed
-transcriber returns empty
-same current generation resumes
-```
+Valid captured utterance enters transcription, returns empty, and G resumes only if still current.
 
-### Slow but valid transcription
+### Slow valid transcription
 
-```text
-player pauses
-transcription remains in flight longer than ordinary false timeout
-Vess does not resume early
-non-empty transcript eventually commits
-```
+Transcription remains in flight longer than ordinary false timeout; Vess does not resume early; later non-empty transcript commits.
 
 ### Decision watchdog
 
-```text
-player pauses
-transcription decision hangs
-watchdog expires
-error is logged
-same generation resumes only if still current
-```
+Transcription hangs; watchdog records error and resumes only if G remains current.
 
-### Superseded false interruption
+### New request before commit
 
 ```text
-player pauses
-newer request arrives
-candidate becomes false
-old waveform does not resume
+G is paused
+new request creates H
+old barge-in transcript arrives late
+cancel_generation(G) must not cancel H
+G never resumes
 ```
 
 ### Interrupt during first clause
 
-No complete assistant clause exists; prior user request is still retained as interrupted memory.
+No completed assistant clause exists; prior user request remains as interrupted memory.
 
 ### Interrupt between clauses
 
-Completed clauses stay delivered; next prepared clause is abandoned after commit.
+Completed clauses remain delivered; prepared next clause is abandoned after commit.
 
 ### Normal generation drain
 
-`finish_generation` marker cannot finalize memory until all preceding physical playback completes.
+`finish_generation(G)` cannot finalize memory until all preceding physical playback completes.
 
 ### Duplicate candidate
 
-Two candidate events cause one pause transition.
+Two candidate events cause one pause.
 
-### Commit racing synthesis completion
+### Commit racing synthesis
 
-A waveform produced at the race boundary becomes stale and never plays.
+Waveform created at race boundary becomes stale and never plays.
 
 ### Shutdown while paused
 
-Shutdown clears paused state without deadlock or delayed resume.
+No deadlock, delayed resume, or stale state.
 
 ### Feature disabled
 
-Existing behavior remains unchanged.
+Current behavior remains unchanged.
 
 ---
 
 ## 19. Target-PC Acceptance
 
-Remote tests prove policy and race correctness, not acoustics.
+Before enabling barge-in by default:
 
-Before barge-in becomes enabled by default:
-
-1. choose/integrate the actual local echo-preprocessing backend
-2. run Vess speech at realistic speaker volume with no human speech and verify self-echo does not pause it
-3. test interruptions at multiple distances, directions, and normal voice volumes
+1. choose/integrate actual local echo preprocessing
+2. run Vess speaking at realistic speaker volume with no human speech and verify self-echo does not pause it
+3. test interruptions at multiple distances/directions/voice volumes
 4. measure p50/p95 pause latency
 5. test very short real interruptions such as "wait"
-6. test coughs, keyboard noise, room noise, and accidental speech-like sounds
-7. test speech beginning immediately after Vess starts and near the end of a clause
+6. test coughs, keyboard/room noise, and accidental speech-like sounds
+7. test speech beginning immediately after Vess starts and near clause end
 8. verify false-interruption resume sounds natural
 9. verify Qwen, Whisper, TTS, preprocessing, and rendering coexist within CPU/RAM/VRAM limits
-10. inspect traces for stale playback, timer races, and delivery-memory errors
-11. tune pause/timeout values only from these measurements
+10. inspect traces for stale playback, timer races, compare-and-cancel mistakes, and delivery-memory errors
+11. tune timing only from measured results
 
 Only then should `barge_in.enabled` become true by default.
 
@@ -801,7 +764,7 @@ Only then should `barge_in.enabled` become true by default.
 Likely production files/modules:
 
 - `perception/audio.py`
-- new focused audio preprocessing module
+- new focused audio-preprocessing module
 - new `output/audio_player.py`
 - `output/voice.py`
 - `brain/llm.py`
@@ -811,16 +774,14 @@ Likely production files/modules:
 - `main.py`
 - `config.json`
 
-Tests extend audio, TTS pipeline, voice freshness, conversation freshness, short-term memory, and new coordinator/player behavior.
+Tests extend audio, TTS pipeline, voice freshness, conversation freshness, short-term memory, coordinator, and player behavior.
 
 Do not combine this feature with long-term memory, proactive behavior, planner work, or TTS-engine benchmarking.
 
----
-
 ## References Informing the Design
 
-- Current LiveKit voice-agent turn handling separates interruption detection from turn policy, supports false-interruption recovery, and truncates history around delivered speech.
+- Current LiveKit turn handling separates interruption detection from turn policy, supports false-interruption recovery, and truncates history around delivered speech.
 - WebRTC AEC3 is built around capture plus render-reference processing rather than raw VAD alone.
-- python-sounddevice/PortAudio stream APIs distinguish graceful stop from immediate abort; immediate abort is the appropriate primitive for fast barge-in cancellation.
+- python-sounddevice/PortAudio stream APIs distinguish graceful stop from immediate abort; immediate abort is the appropriate primitive for fast barge-in pause.
 
 These references inform architecture only. They are not automatically runtime dependencies.
