@@ -12,7 +12,7 @@ import numpy as np
 
 
 class VoiceOutput:
-    """Synthesize and play one clause at a time on a dedicated worker."""
+    """Synthesize and play speech while skipping obsolete response generations."""
 
     def __init__(
         self,
@@ -27,7 +27,11 @@ class VoiceOutput:
         self._event_log = event_log
         self._synthesize = synthesize
         self._play = play or _play_audio
-        self._queue: queue.Queue[tuple[str, str | None] | None] = queue.Queue()
+        self._queue: queue.Queue[
+            tuple[str, str | None, int | None] | None
+        ] = queue.Queue()
+        self._generation_lock = threading.Lock()
+        self._active_generation = 0
         self._thread: threading.Thread | None = None
         self._acknowledgement = "Yeah?"
         self._acknowledgement_audio: np.ndarray | None = None
@@ -43,18 +47,27 @@ class VoiceOutput:
         )
         self._thread.start()
 
-    def enqueue(self, text: str) -> None:
-        """Speak text after every previously queued clause."""
-        self._queue.put(("speak", text))
+    def begin_generation(self, generation_id: int) -> None:
+        """Mark every older queued response as obsolete."""
+        with self._generation_lock:
+            self._active_generation = generation_id
+        self._state.update_debug(tts_generation=generation_id)
+
+    def enqueue(self, text: str, generation_id: int | None = None) -> None:
+        """Speak text unless a newer response supersedes its generation."""
+        self._queue.put(("speak", text, generation_id))
+        self._state.update_debug(tts_queue=self._queue.qsize())
 
     def prepare_acknowledgement(self, text: str = "Yeah?") -> None:
         """Cache a short acknowledgement in the speech worker."""
         self._acknowledgement = text
-        self._queue.put(("prepare", text))
+        self._queue.put(("prepare", text, None))
+        self._state.update_debug(tts_queue=self._queue.qsize())
 
-    def enqueue_acknowledgement(self) -> None:
-        """Play the prepared acknowledgement at the next queue position."""
-        self._queue.put(("acknowledgement", None))
+    def enqueue_acknowledgement(self, generation_id: int | None = None) -> None:
+        """Play the prepared acknowledgement if it is still current."""
+        self._queue.put(("acknowledgement", None, generation_id))
+        self._state.update_debug(tts_queue=self._queue.qsize())
 
     def close(self) -> None:
         """Finish queued speech before stopping the worker."""
@@ -69,13 +82,17 @@ class VoiceOutput:
             item = self._queue.get()
             if item is None:
                 return
-            kind, text = item
+            kind, text, generation_id = item
+            self._state.update_debug(tts_queue=self._queue.qsize())
+            if kind != "prepare" and self._is_stale(generation_id):
+                self._record_stale_skip(generation_id, stage="queued")
+                continue
             if kind == "prepare":
                 self._prepare(text or self._acknowledgement)
             elif kind == "acknowledgement":
-                self._speak_acknowledgement()
+                self._speak_acknowledgement(generation_id)
             else:
-                self._speak(text or "")
+                self._speak(text or "", generation_id=generation_id)
 
     def _prepare(self, text: str) -> None:
         try:
@@ -85,15 +102,25 @@ class VoiceOutput:
             self._event_log.append("voice_error", {"error": str(error)})
             self._state.record_debug("tts_error", error=str(error), text=text)
 
-    def _speak_acknowledgement(self) -> None:
+    def _speak_acknowledgement(self, generation_id: int | None = None) -> None:
         if self._acknowledgement_audio is None:
             self._prepare(self._acknowledgement)
+        if self._is_stale(generation_id):
+            self._record_stale_skip(generation_id, stage="after_synthesis")
+            return
         if self._acknowledgement_audio is not None:
             self._state.record_debug("tts_started", text=self._acknowledgement)
-            self._play_waveform(self._acknowledgement_audio)
+            self._play_waveform(
+                self._acknowledgement_audio,
+                generation_id=generation_id,
+            )
             self._state.record_debug("tts_complete", text=self._acknowledgement)
 
-    def _speak(self, text: str) -> None:
+    def _speak(
+        self,
+        text: str,
+        generation_id: int | None = None,
+    ) -> None:
         self._state.record_debug("tts_started", text=text)
         synthesis_started = time.perf_counter()
         try:
@@ -103,7 +130,14 @@ class VoiceOutput:
             self._state.record_debug("tts_error", error=str(error), text=text)
             return
         synthesis_ms = (time.perf_counter() - synthesis_started) * 1000.0
-        self._play_waveform(audio, synthesis_ms=synthesis_ms)
+        if self._is_stale(generation_id):
+            self._record_stale_skip(generation_id, stage="after_synthesis")
+            return
+        self._play_waveform(
+            audio,
+            synthesis_ms=synthesis_ms,
+            generation_id=generation_id,
+        )
         self._state.record_debug("tts_complete", text=text)
 
     def _play_waveform(
@@ -111,7 +145,11 @@ class VoiceOutput:
         audio: np.ndarray,
         *,
         synthesis_ms: float | None = None,
+        generation_id: int | None = None,
     ) -> None:
+        if self._is_stale(generation_id):
+            self._record_stale_skip(generation_id, stage="before_playback")
+            return
         played = False
         with self._state.locked():
             self._state.speaking = True
@@ -134,6 +172,19 @@ class VoiceOutput:
                 self._state.speaking = False
                 if played:
                     self._state.last_spoke = time.time()
+
+    def _is_stale(self, generation_id: int | None) -> bool:
+        if generation_id is None:
+            return False
+        with self._generation_lock:
+            return generation_id != self._active_generation
+
+    def _record_stale_skip(self, generation_id: int | None, *, stage: str) -> None:
+        self._state.record_debug(
+            "stale_tts_skipped",
+            generation_id=generation_id,
+            stage=stage,
+        )
 
     def _synthesize_text(self, text: str) -> np.ndarray:
         if self._synthesize is None:
