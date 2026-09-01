@@ -20,6 +20,8 @@ class ConversationTurn:
     timestamp: float
     user: str
     assistant: str
+    status: str = "completed"
+    interrupted_clause: str | None = None
 
 
 @dataclass
