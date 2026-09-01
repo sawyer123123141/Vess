@@ -65,6 +65,8 @@ def get_scenario(
         return _priority_conflicts(performances)
     if name == "geometry_stress":
         return _geometry_stress(tuple(moods), performances)
+    if name == "eye_reaction_cycle":
+        return _eye_reaction_cycle(performances)
     raise ValueError(f"unknown behavior scenario: {name}")
 
 
@@ -296,3 +298,43 @@ def _geometry_stress(
             )
             index += 1
     return BehaviorScenario("geometry_stress", tuple(phases))
+
+
+def _eye_reaction_cycle(
+    performances: dict[str, PerformanceCue],
+) -> BehaviorScenario:
+    neutral = _require_cue(performances, "neutral")
+    curious = _require_cue(performances, "curious")
+    playful = _require_cue(performances, "playful")
+    emphatic = _require_cue(performances, "emphatic")
+    thoughtful = _require_cue(performances, "thoughtful")
+    sympathetic = _require_cue(performances, "sympathetic")
+    uncertain = _require_cue(performances, "uncertain")
+
+    sequence = (
+        ("neutral_1", 0.6, neutral),
+        ("curious", 0.8, curious),
+        ("neutral_2", 0.6, neutral),
+        ("playful", 0.8, playful),
+        ("neutral_3", 0.6, neutral),
+        ("emphatic", 0.8, emphatic),
+        ("thoughtful", 0.8, thoughtful),
+        ("sympathetic", 0.8, sympathetic),
+        ("uncertain", 0.8, uncertain),
+        ("neutral_4", 0.8, neutral),
+    )
+    phases = tuple(
+        ScenarioPhase(
+            phase_name,
+            duration,
+            _phase_state(
+                performance=cue,
+                person=True,
+                listening=False,
+                thinking=False,
+                speaking=True,
+            ),
+        )
+        for phase_name, duration, cue in sequence
+    )
+    return BehaviorScenario("eye_reaction_cycle", phases)
