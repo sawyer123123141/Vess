@@ -191,8 +191,6 @@ class VoiceOutput:
                 return False
             self._interruption_decision = "commit"
             self._interruption_condition.notify_all()
-
-        self._player.discard_paused()
         return True
 
     def resume_after_false_interruption(self, generation_id: int) -> bool:
@@ -521,6 +519,7 @@ class VoiceOutput:
             decision = self._interruption_decision
 
         if decision == "commit":
+            self._player.discard_paused()
             self._emit_delivery(
                 "clause_abandoned",
                 generation_id=context.generation_id,
