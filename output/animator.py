@@ -157,6 +157,8 @@ class FaceAnimator:
             if not key.startswith(("color_", "move_"))
         }
         self._last_color = tuple(self.current[f"color_{channel}"] for channel in "rgb")
+        self._last_render_gaze: tuple[float, float] = (0.0, 0.0)
+        self._last_render_offset: tuple[float, float] = (0.0, 0.0)
 
         self.blink_phase: float = -1.0
         self.next_blink: float = self._rng.uniform(*_BLINK_GAP)
@@ -255,6 +257,8 @@ class FaceAnimator:
 
         self._last_shape = dict(shape)
         self._last_color = color
+        self._last_render_gaze = gaze
+        self._last_render_offset = offset
         return face.render(
             shape,
             color,
@@ -263,6 +267,21 @@ class FaceAnimator:
             gaze,
             offset,
         )
+
+    def debug_snapshot(self) -> dict[str, object]:
+        return {
+            "interaction_mode": self._interaction_mode,
+            "render_gaze": tuple(self._last_render_gaze),
+            "render_offset": tuple(self._last_render_offset),
+            "blink_openness": self._openness(),
+            "shape": dict(self._last_shape),
+            "color": tuple(self._last_color),
+            "fixation": tuple(self._fixation),
+            "speaking_break_active": self._speak_break_left > 0.0,
+            "speaking_break_remaining": max(self._speak_break_left, 0.0),
+            "performance_current": dict(self.performance_current),
+            "performance_target": dict(self._performance_target),
+        }
 
     @staticmethod
     def _mode_for(
