@@ -7,6 +7,7 @@ import unittest
 import numpy as np
 
 from output.voice import VoiceOutput
+from performance import PerformanceCue
 from state import State
 
 
@@ -311,6 +312,154 @@ class TtsPipelineTests(unittest.TestCase):
 
         self.assertEqual(len(played), 1)
         np.testing.assert_array_equal(played[0], acknowledgement)
+
+    def test_performance_activates_only_during_physical_playback(self) -> None:
+        state = State()
+        play_started = threading.Event()
+        release_play = threading.Event()
+
+        def play(audio: np.ndarray, sample_rate: int) -> None:
+            self.assertEqual(state.performance.expression, "playful")
+            play_started.set()
+            release_play.wait(timeout=1.0)
+
+        voice = VoiceOutput(
+            {"voice": {"sample_rate": 1_000}},
+            state,
+            RecordingLog(),
+            synthesize=lambda text: np.ones(10, dtype=np.float32),
+            play=play,
+        )
+        voice.start()
+        voice.begin_generation(1)
+        voice.enqueue(
+            "hello",
+            generation_id=1,
+            performance=PerformanceCue("playful", 0.65),
+        )
+        self.assertTrue(play_started.wait(timeout=0.5))
+        release_play.set()
+        voice.close()
+
+        self.assertEqual(state.performance, PerformanceCue())
+
+    def test_prepared_cue_does_not_activate_before_playback(self) -> None:
+        first_play_started = threading.Event()
+        release_first_play = threading.Event()
+        second_synthesized = threading.Event()
+        state = State()
+
+        def synthesize(text: str) -> np.ndarray:
+            if text == "second":
+                second_synthesized.set()
+            return np.ones(10, dtype=np.float32)
+
+        def play(audio: np.ndarray, sample_rate: int) -> None:
+            if not first_play_started.is_set():
+                first_play_started.set()
+                release_first_play.wait(timeout=1.0)
+
+        voice = VoiceOutput(
+            {"voice": {"sample_rate": 1_000}},
+            state,
+            RecordingLog(),
+            synthesize=synthesize,
+            play=play,
+        )
+        voice.start()
+        voice.begin_generation(1)
+        voice.enqueue("first", generation_id=1)
+        voice.enqueue(
+            "second",
+            generation_id=1,
+            performance=PerformanceCue("thoughtful", 0.55),
+        )
+
+        self.assertTrue(first_play_started.wait(timeout=0.5))
+        self.assertTrue(second_synthesized.wait(timeout=0.5))
+        self.assertEqual(state.performance, PerformanceCue())
+        release_first_play.set()
+        voice.close()
+
+    def test_stale_prepared_audio_never_activates_its_performance(self) -> None:
+        first_play_started = threading.Event()
+        release_first_play = threading.Event()
+        second_synthesized = threading.Event()
+        seen: list[str] = []
+        state = State()
+
+        def synthesize(text: str) -> np.ndarray:
+            if text == "old second":
+                second_synthesized.set()
+            return np.ones(10, dtype=np.float32)
+
+        def play(audio: np.ndarray, sample_rate: int) -> None:
+            seen.append(state.performance.expression)
+            if len(seen) == 1:
+                first_play_started.set()
+                release_first_play.wait(timeout=1.0)
+
+        voice = VoiceOutput(
+            {"voice": {"sample_rate": 1_000}},
+            state,
+            RecordingLog(),
+            synthesize=synthesize,
+            play=play,
+        )
+        voice.start()
+        voice.begin_generation(1)
+        voice.enqueue("old first", generation_id=1)
+        voice.enqueue(
+            "old second",
+            generation_id=1,
+            performance=PerformanceCue("playful", 0.65),
+        )
+        self.assertTrue(first_play_started.wait(timeout=0.5))
+        self.assertTrue(second_synthesized.wait(timeout=0.5))
+        voice.begin_generation(2)
+        voice.enqueue(
+            "new answer",
+            generation_id=2,
+            performance=PerformanceCue("thoughtful", 0.55),
+        )
+        release_first_play.set()
+        voice.close()
+
+        self.assertNotIn("playful", seen)
+        self.assertIn("thoughtful", seen)
+
+    def test_playback_error_clears_performance_and_records_lifecycle(self) -> None:
+        state = State()
+
+        def fail_play(audio: np.ndarray, sample_rate: int) -> None:
+            self.assertEqual(state.performance.expression, "emphatic")
+            raise RuntimeError("speaker failed")
+
+        voice = VoiceOutput(
+            {"voice": {"sample_rate": 1_000}},
+            state,
+            RecordingLog(),
+            synthesize=lambda text: np.ones(10, dtype=np.float32),
+            play=fail_play,
+        )
+        voice.start()
+        voice.begin_generation(1)
+        voice.enqueue(
+            "important",
+            generation_id=1,
+            performance=PerformanceCue("emphatic", 0.7),
+        )
+        voice.close()
+
+        self.assertEqual(state.performance, PerformanceCue())
+        events = state.debug_snapshot()["events"]
+        started = next(event for event in events if event["event"] == "performance_started")
+        ended = next(event for event in events if event["event"] == "performance_ended")
+        self.assertEqual(started["text"], "important")
+        self.assertEqual(started["expression"], "emphatic")
+        self.assertEqual(started["generation_id"], 1)
+        self.assertEqual(ended["expression"], "emphatic")
+        self.assertEqual(ended["generation_id"], 1)
 
 
 if __name__ == "__main__":

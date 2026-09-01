@@ -1,0 +1,50 @@
+{
+  "neutral": {
+    "intensity": 0.0,
+    "shape": {},
+    "eye_motion": {"l_x": 0.0, "l_y": 0.0, "r_x": 0.0, "r_y": 0.0, "reaction": 0.0},
+    "movement": {}
+  },
+  "curious": {
+    "intensity": 0.55,
+    "shape": {"l_h": 1.0, "r_h": 1.4, "r_cy": -0.5},
+    "eye_motion": {"l_x": 0.0, "l_y": -0.28, "r_x": 0.0, "r_y": -0.48, "reaction": 0.45},
+    "movement": {"hold_scale": 0.8, "track_bias_scale": 1.1}
+  },
+  "amused": {
+    "intensity": 0.5,
+    "shape": {"l_h": -1.0, "r_h": -0.7, "l_slant": 0.35, "r_slant": 0.25},
+    "eye_motion": {"l_x": 0.10, "l_y": 0.12, "r_x": -0.06, "r_y": 0.08, "reaction": 0.25},
+    "movement": {"hold_scale": 1.05, "speaking_break_scale": 1.15}
+  },
+  "playful": {
+    "intensity": 0.65,
+    "shape": {"l_h": -0.5, "r_h": 0.3, "l_slant": 0.7, "r_slant": -0.35, "r_cy": -0.5},
+    "eye_motion": {"l_x": -0.18, "l_y": 0.22, "r_x": 0.30, "r_y": -0.62, "reaction": 0.80},
+    "movement": {"hold_scale": 0.75, "ease_scale": 0.85, "speaking_break_scale": 1.4}
+  },
+  "emphatic": {
+    "intensity": 0.7,
+    "shape": {"l_h": 1.2, "r_h": 1.0},
+    "eye_motion": {"l_x": 0.0, "l_y": -0.32, "r_x": 0.0, "r_y": -0.27, "reaction": 0.55},
+    "movement": {"hold_scale": 0.8, "track_bias_scale": 1.15, "speaking_break_scale": 0.4}
+  },
+  "thoughtful": {
+    "intensity": 0.55,
+    "shape": {"l_h": -0.5, "r_h": -0.4},
+    "eye_motion": {"l_x": 0.0, "l_y": -0.16, "r_x": 0.0, "r_y": -0.24, "reaction": 0.20},
+    "movement": {"hold_scale": 1.4, "ease_scale": 1.2, "gaze_y_bias": -0.22}
+  },
+  "sympathetic": {
+    "intensity": 0.5,
+    "shape": {"l_h": -0.8, "r_h": -0.6, "l_slant": -0.4, "r_slant": -0.3},
+    "eye_motion": {"l_x": 0.10, "l_y": 0.18, "r_x": -0.08, "r_y": 0.15, "reaction": 0.15},
+    "movement": {"hold_scale": 1.25, "ease_scale": 1.15, "gaze_y_bias": 0.15, "speaking_break_scale": 0.7}
+  },
+  "uncertain": {
+    "intensity": 0.5,
+    "shape": {"l_slant": 0.3, "r_slant": -0.35, "r_cy": -0.6},
+    "eye_motion": {"l_x": 0.0, "l_y": 0.10, "r_x": 0.0, "r_y": -0.46, "reaction": 0.55},
+    "movement": {"hold_scale": 1.15, "gaze_y_bias": -0.05, "speaking_break_scale": 1.3}
+  }
+}

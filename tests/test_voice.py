@@ -39,7 +39,11 @@ class VoiceOutputTests(unittest.TestCase):
         self.assertFalse(state.speaking)
         self.assertGreaterEqual(state.last_spoke, started)
         self.assertEqual(
-            [event["event"] for event in state.debug_snapshot()["events"]],
+            [
+                event["event"]
+                for event in state.debug_snapshot()["events"]
+                if event["event"].startswith("tts_")
+            ],
             [
                 "tts_started",
                 "tts_playback_started",

@@ -10,6 +10,8 @@ from typing import Any
 
 import numpy as np
 
+from performance import PerformanceCue
+
 
 class VoiceOutput:
     """Synthesize one clause ahead while skipping obsolete generations."""
@@ -29,7 +31,7 @@ class VoiceOutput:
         self._play = play or _play_audio
 
         self._queue: queue.Queue[
-            tuple[str, str | None, int | None] | None
+            tuple[str, str | None, int | None, PerformanceCue] | None
         ] = queue.Queue()
         self._ready_queue: queue.Queue[
             tuple[
@@ -39,6 +41,7 @@ class VoiceOutput:
                 int | None,
                 float | None,
                 tuple[float, float] | None,
+                PerformanceCue | None,
             ]
             | None
         ] = queue.Queue(maxsize=1)
@@ -77,20 +80,25 @@ class VoiceOutput:
             self._active_generation = generation_id
         self._state.update_debug(tts_generation=generation_id)
 
-    def enqueue(self, text: str, generation_id: int | None = None) -> None:
-        """Queue text for synthesis unless a newer response supersedes it."""
-        self._queue.put(("speak", text, generation_id))
+    def enqueue(
+        self,
+        text: str,
+        generation_id: int | None = None,
+        performance: PerformanceCue | None = None,
+    ) -> None:
+        """Queue text and its transient performance cue for synthesis."""
+        self._queue.put(("speak", text, generation_id, performance or PerformanceCue()))
         self._state.update_debug(tts_queue=self._queue.qsize())
 
     def prepare_acknowledgement(self, text: str = "Yeah?") -> None:
         """Cache a short acknowledgement in the synthesis worker."""
         self._acknowledgement = text
-        self._queue.put(("prepare", text, None))
+        self._queue.put(("prepare", text, None, PerformanceCue()))
         self._state.update_debug(tts_queue=self._queue.qsize())
 
     def enqueue_acknowledgement(self, generation_id: int | None = None) -> None:
         """Queue the prepared acknowledgement if it is still current."""
-        self._queue.put(("acknowledgement", None, generation_id))
+        self._queue.put(("acknowledgement", None, generation_id, PerformanceCue()))
         self._state.update_debug(tts_queue=self._queue.qsize())
 
     def close(self) -> None:
@@ -111,7 +119,7 @@ class VoiceOutput:
             item = self._queue.get()
             if item is None:
                 return
-            kind, text, generation_id = item
+            kind, text, generation_id, performance = item
             self._state.update_debug(tts_queue=self._queue.qsize())
             if kind != "prepare" and self._is_stale(generation_id):
                 self._record_stale_skip(generation_id, stage="queued")
@@ -121,7 +129,11 @@ class VoiceOutput:
             elif kind == "acknowledgement":
                 self._speak_acknowledgement(generation_id)
             else:
-                self._speak(text or "", generation_id=generation_id)
+                self._speak(
+                    text or "",
+                    generation_id=generation_id,
+                    performance=performance,
+                )
 
     def _playback_run(self) -> None:
         """Play prepared waveforms serially while synthesis stays one ahead."""
@@ -133,7 +145,15 @@ class VoiceOutput:
             self._ready_slots.release()
             self._state.update_debug(tts_ready_queue=self._ready_queue.qsize())
 
-            kind, text, audio, generation_id, synthesis_ms, raw_edge_silence = item
+            (
+                kind,
+                text,
+                audio,
+                generation_id,
+                synthesis_ms,
+                raw_edge_silence,
+                performance,
+            ) = item
             if self._is_stale(generation_id):
                 self._record_stale_skip(generation_id, stage="prepared")
                 continue
@@ -146,6 +166,7 @@ class VoiceOutput:
                 synthesis_ms=synthesis_ms,
                 generation_id=generation_id,
                 raw_edge_silence_ms=raw_edge_silence,
+                performance=performance,
             )
             self._state.record_debug("tts_complete", text=text)
 
@@ -183,6 +204,7 @@ class VoiceOutput:
                 generation_id,
                 synthesis_ms,
                 None,
+                None,
             )
         )
         self._state.update_debug(tts_ready_queue=self._ready_queue.qsize())
@@ -191,10 +213,12 @@ class VoiceOutput:
         self,
         text: str,
         generation_id: int | None = None,
+        performance: PerformanceCue | None = None,
     ) -> None:
         if not self._reserve_ready_slot(generation_id):
             return
 
+        cue = performance or PerformanceCue()
         self._state.record_debug("tts_started", text=text)
         synthesis_started = time.perf_counter()
         try:
@@ -223,6 +247,7 @@ class VoiceOutput:
                 generation_id,
                 synthesis_ms,
                 raw_edge_silence,
+                cue,
             )
         )
         self._state.update_debug(tts_ready_queue=self._ready_queue.qsize())
@@ -244,12 +269,14 @@ class VoiceOutput:
         synthesis_ms: float | None = None,
         generation_id: int | None = None,
         raw_edge_silence_ms: tuple[float, float] | None = None,
+        performance: PerformanceCue | None = None,
     ) -> None:
         if self._is_stale(generation_id):
             self._record_stale_skip(generation_id, stage="before_playback")
             return
 
         played = False
+        performance_active = False
         with self._state.locked():
             self._state.speaking = True
         try:
@@ -291,6 +318,22 @@ class VoiceOutput:
                     payload["gap_ms"] = gap_ms
                     self._state.update_debug(tts_gap_ms=gap_ms)
 
+                if performance is not None:
+                    with self._state.locked():
+                        self._state.performance = performance
+                    self._state.update_debug(
+                        performance_expression=performance.expression,
+                        performance_intensity=performance.intensity,
+                    )
+                    self._state.record_debug(
+                        "performance_started",
+                        text=text,
+                        expression=performance.expression,
+                        intensity=performance.intensity,
+                        generation_id=generation_id,
+                    )
+                    performance_active = True
+
                 self._state.record_debug("tts_playback_started", **payload)
                 self._play(audio, sample_rate)
                 played = True
@@ -298,6 +341,18 @@ class VoiceOutput:
             self._event_log.append("voice_error", {"error": str(error)})
             self._state.record_debug("tts_error", error=str(error))
         finally:
+            if performance_active and performance is not None:
+                with self._state.locked():
+                    self._state.performance = PerformanceCue()
+                self._state.update_debug(
+                    performance_expression="neutral",
+                    performance_intensity=0.0,
+                )
+                self._state.record_debug(
+                    "performance_ended",
+                    expression=performance.expression,
+                    generation_id=generation_id,
+                )
             with self._state.locked():
                 self._state.speaking = False
                 if played:

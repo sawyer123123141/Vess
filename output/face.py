@@ -130,21 +130,28 @@ def _coverage(distance: np.ndarray) -> np.ndarray:
     return np.clip(0.5 - distance, 0.0, 1.0)
 
 
-def _eye(side: str, shape: dict[str, float], openness: float,
-         gaze: tuple[float, float], offset: tuple[float, float]) -> np.ndarray:
+def _eye(
+    side: str,
+    shape: dict[str, float],
+    openness: float,
+    gaze: tuple[float, float],
+    offset: tuple[float, float],
+    eye_offset: tuple[float, float],
+) -> np.ndarray:
     def p(key: str) -> float:
         return shape[f"{side}_{key}"]
 
     half_w = p("w") / 2.0
     half_h = max(p("h") * openness, _MIN_EYE_H) / 2.0
 
-    # `offset` shifts the whole pair together, so it moves the eye without
-    # touching the relationship between the two.
-    px = _XX - (p("cx") + offset[0])
+    # `offset` shifts the pair together; `eye_offset` is local to this eye.
+    center_x = p("cx") + offset[0] + eye_offset[0]
+    center_y = p("cy") + offset[1] + eye_offset[1]
+    px = _XX - center_x
     # The slant ramps from zero at the outer edge to its full value at the
     # inner edge, tilting the eye the way a brow does.
     tilt = p("slant") * _INNER[side] * (px / half_w)
-    py = _YY - (p("cy") + offset[1]) - tilt
+    py = _YY - center_y - tilt
 
     cover = _coverage(_rounded_box(px, py, half_w, half_h, p("radius")))
 
@@ -171,22 +178,32 @@ def _eye(side: str, shape: dict[str, float], openness: float,
     return cover
 
 
-def render(shape: dict[str, float], color: tuple[float, float, float],
-           brightness: float, openness: float, gaze: tuple[float, float],
-           offset: tuple[float, float] = (0.0, 0.0)) -> np.ndarray:
+def render(
+    shape: dict[str, float],
+    color: tuple[float, float, float],
+    brightness: float,
+    openness: float,
+    gaze: tuple[float, float],
+    offset: tuple[float, float] = (0.0, 0.0),
+    eye_offsets: tuple[
+        tuple[float, float],
+        tuple[float, float],
+    ] = ((0.0, 0.0), (0.0, 0.0)),
+) -> np.ndarray:
     """Draw one frame.
 
     `openness` is 1 for open and 0 for shut. `gaze` is -1..1 in each axis,
     where +x is the viewer's right and +y is down. Each pupil travels as far
     as its own eye allows, so the smaller eye moves less.
 
-    `offset` moves the whole pair in panel pixels. It is a float on purpose --
-    a sub-pixel shift renders as a shift in edge brightness, which is what
-    makes a one-pixel drift look like drifting rather than jumping.
+    `offset` moves the whole pair in panel pixels. `eye_offsets` moves the
+    left and right eye bodies independently before pupil gaze is applied.
+    Fractional values are intentional: sub-pixel movement changes edge
+    brightness instead of snapping by whole pixels.
     """
     cover = np.maximum(
-        _eye("l", shape, openness, gaze, offset),
-        _eye("r", shape, openness, gaze, offset),
+        _eye("l", shape, openness, gaze, offset, eye_offsets[0]),
+        _eye("r", shape, openness, gaze, offset, eye_offsets[1]),
     )
     rgb = np.asarray(color, dtype=np.float32) * float(np.clip(brightness, 0.0, 1.0))
     frame = cover[:, :, None] * rgb

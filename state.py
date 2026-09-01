@@ -12,6 +12,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Iterator
 
+from performance import PerformanceCue
+
 
 @dataclass(frozen=True)
 class ConversationTurn:
@@ -26,6 +28,7 @@ class State:
     persona: str = "friendly"
     mood: str = "neutral"
     mood_until: float = 0.0         # epoch; decays to neutral past this
+    performance: PerformanceCue = field(default_factory=PerformanceCue)
 
     # appearance
     color: tuple[int, int, int] | None = None
