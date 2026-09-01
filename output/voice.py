@@ -28,8 +28,6 @@ class VoiceOutput:
         self._synthesize = synthesize
         self._play = play or _play_audio
 
-        # Text work may arrive faster than speech can play, but only one completed
-        # waveform is allowed to wait ahead of the waveform currently playing.
         self._queue: queue.Queue[
             tuple[str, str | None, int | None] | None
         ] = queue.Queue()
@@ -124,8 +122,6 @@ class VoiceOutput:
             if item is None:
                 return
 
-            # Removing the prepared waveform frees exactly one slot. Synthesis may
-            # now prepare the next clause while this waveform is physically playing.
             self._ready_slots.release()
             self._state.update_debug(tts_ready_queue=self._ready_queue.qsize())
 
@@ -138,6 +134,7 @@ class VoiceOutput:
                 self._state.record_debug("tts_started", text=text)
             self._play_waveform(
                 audio,
+                text=text,
                 synthesis_ms=synthesis_ms,
                 generation_id=generation_id,
             )
@@ -220,6 +217,7 @@ class VoiceOutput:
         self,
         audio: np.ndarray,
         *,
+        text: str,
         synthesis_ms: float | None = None,
         generation_id: int | None = None,
     ) -> None:
@@ -233,7 +231,7 @@ class VoiceOutput:
         try:
             if audio.size:
                 sample_rate = int(self._config.get("voice", {}).get("sample_rate", 24_000))
-                payload: dict[str, object] = {}
+                payload: dict[str, object] = {"text": text}
                 if synthesis_ms is not None:
                     rounded = round(synthesis_ms, 1)
                     payload["synthesis_ms"] = rounded
