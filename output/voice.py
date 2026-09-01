@@ -32,7 +32,15 @@ class VoiceOutput:
             tuple[str, str | None, int | None] | None
         ] = queue.Queue()
         self._ready_queue: queue.Queue[
-            tuple[str, str, np.ndarray, int | None, float | None] | None
+            tuple[
+                str,
+                str,
+                np.ndarray,
+                int | None,
+                float | None,
+                tuple[float, float] | None,
+            ]
+            | None
         ] = queue.Queue(maxsize=1)
         self._ready_slots = threading.Semaphore(1)
 
@@ -125,7 +133,7 @@ class VoiceOutput:
             self._ready_slots.release()
             self._state.update_debug(tts_ready_queue=self._ready_queue.qsize())
 
-            kind, text, audio, generation_id, synthesis_ms = item
+            kind, text, audio, generation_id, synthesis_ms, raw_edge_silence = item
             if self._is_stale(generation_id):
                 self._record_stale_skip(generation_id, stage="prepared")
                 continue
@@ -137,6 +145,7 @@ class VoiceOutput:
                 text=text,
                 synthesis_ms=synthesis_ms,
                 generation_id=generation_id,
+                raw_edge_silence_ms=raw_edge_silence,
             )
             self._state.record_debug("tts_complete", text=text)
 
@@ -173,6 +182,7 @@ class VoiceOutput:
                 self._acknowledgement_audio,
                 generation_id,
                 synthesis_ms,
+                None,
             )
         )
         self._state.update_debug(tts_ready_queue=self._ready_queue.qsize())
@@ -201,7 +211,20 @@ class VoiceOutput:
             self._record_stale_skip(generation_id, stage="after_synthesis")
             return
 
-        self._ready_queue.put(("speak", text, audio, generation_id, synthesis_ms))
+        sample_rate = int(self._config.get("voice", {}).get("sample_rate", 24_000))
+        raw_edge_silence = _waveform_edge_silence_ms(audio, sample_rate)
+        audio = _trim_waveform_edges(audio, sample_rate)
+
+        self._ready_queue.put(
+            (
+                "speak",
+                text,
+                audio,
+                generation_id,
+                synthesis_ms,
+                raw_edge_silence,
+            )
+        )
         self._state.update_debug(tts_ready_queue=self._ready_queue.qsize())
 
     def _reserve_ready_slot(self, generation_id: int | None) -> bool:
@@ -220,6 +243,7 @@ class VoiceOutput:
         text: str,
         synthesis_ms: float | None = None,
         generation_id: int | None = None,
+        raw_edge_silence_ms: tuple[float, float] | None = None,
     ) -> None:
         if self._is_stale(generation_id):
             self._record_stale_skip(generation_id, stage="before_playback")
@@ -243,10 +267,17 @@ class VoiceOutput:
                 )
                 payload["leading_silence_ms"] = leading_silence_ms
                 payload["trailing_silence_ms"] = trailing_silence_ms
-                self._state.update_debug(
-                    tts_leading_silence_ms=leading_silence_ms,
-                    tts_trailing_silence_ms=trailing_silence_ms,
-                )
+                debug_values: dict[str, object] = {
+                    "tts_leading_silence_ms": leading_silence_ms,
+                    "tts_trailing_silence_ms": trailing_silence_ms,
+                }
+                if raw_edge_silence_ms is not None:
+                    raw_leading_ms, raw_trailing_ms = raw_edge_silence_ms
+                    payload["raw_leading_silence_ms"] = raw_leading_ms
+                    payload["raw_trailing_silence_ms"] = raw_trailing_ms
+                    debug_values["tts_raw_leading_silence_ms"] = raw_leading_ms
+                    debug_values["tts_raw_trailing_silence_ms"] = raw_trailing_ms
+                self._state.update_debug(**debug_values)
 
                 playback_started_at = time.perf_counter()
                 if (
@@ -314,6 +345,32 @@ def _waveform_edge_silence_ms(
     leading_ms = round(first / sample_rate * 1000.0, 1)
     trailing_ms = round((samples.size - last - 1) / sample_rate * 1000.0, 1)
     return leading_ms, trailing_ms
+
+
+def _trim_waveform_edges(
+    audio: np.ndarray,
+    sample_rate: int,
+    *,
+    threshold: float = 0.001,
+    keep_leading_ms: float = 100.0,
+    keep_trailing_ms: float = 160.0,
+) -> np.ndarray:
+    """Trim only excess near-silence while preserving generous speech margins."""
+    samples = np.asarray(audio, dtype=np.float32).reshape(-1)
+    if samples.size == 0 or sample_rate <= 0:
+        return samples
+
+    audible = np.flatnonzero(np.abs(samples) > threshold)
+    if audible.size == 0:
+        return samples
+
+    first = int(audible[0])
+    last = int(audible[-1])
+    leading_keep = max(0, round(sample_rate * keep_leading_ms / 1000.0))
+    trailing_keep = max(0, round(sample_rate * keep_trailing_ms / 1000.0))
+    start = max(0, first - leading_keep)
+    end = min(samples.size, last + 1 + trailing_keep)
+    return samples[start:end].copy()
 
 
 def _make_synthesizer(config: dict[str, Any]) -> Callable[[str], np.ndarray]:
