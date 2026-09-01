@@ -239,6 +239,17 @@ class VoiceOutput:
                     payload["synthesis_ms"] = rounded
                     self._state.update_debug(tts_synthesis_ms=rounded)
 
+                leading_silence_ms, trailing_silence_ms = _waveform_edge_silence_ms(
+                    audio,
+                    sample_rate,
+                )
+                payload["leading_silence_ms"] = leading_silence_ms
+                payload["trailing_silence_ms"] = trailing_silence_ms
+                self._state.update_debug(
+                    tts_leading_silence_ms=leading_silence_ms,
+                    tts_trailing_silence_ms=trailing_silence_ms,
+                )
+
                 playback_started_at = time.perf_counter()
                 if (
                     self._last_playback_ended_at is not None
@@ -283,6 +294,28 @@ class VoiceOutput:
         if self._synthesize is None:
             self._synthesize = _make_synthesizer(self._config)
         return self._synthesize(text)
+
+
+def _waveform_edge_silence_ms(
+    audio: np.ndarray,
+    sample_rate: int,
+    threshold: float = 0.001,
+) -> tuple[float, float]:
+    """Estimate contiguous near-silence at the beginning and end of a waveform."""
+    samples = np.asarray(audio, dtype=np.float32).reshape(-1)
+    if samples.size == 0 or sample_rate <= 0:
+        return 0.0, 0.0
+
+    audible = np.flatnonzero(np.abs(samples) > threshold)
+    if audible.size == 0:
+        duration_ms = round(samples.size / sample_rate * 1000.0, 1)
+        return duration_ms, duration_ms
+
+    first = int(audible[0])
+    last = int(audible[-1])
+    leading_ms = round(first / sample_rate * 1000.0, 1)
+    trailing_ms = round((samples.size - last - 1) / sample_rate * 1000.0, 1)
+    return leading_ms, trailing_ms
 
 
 def _make_synthesizer(config: dict[str, Any]) -> Callable[[str], np.ndarray]:
