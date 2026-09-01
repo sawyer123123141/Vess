@@ -59,14 +59,17 @@ def get_scenario(
     performances: dict[str, PerformanceCue],
 ) -> BehaviorScenario:
     """Build one named deterministic scenario from the configured vocabulary."""
+    mood_names = tuple(moods)
     if name == "conversational_cycle":
         return _conversational_cycle(performances)
     if name == "priority_conflicts":
         return _priority_conflicts(performances)
     if name == "geometry_stress":
-        return _geometry_stress(tuple(moods), performances)
+        return _geometry_stress(mood_names, performances)
     if name == "eye_reaction_cycle":
         return _eye_reaction_cycle(performances)
+    if name == "mood_eye_validation":
+        return _mood_eye_validation(mood_names, performances)
     raise ValueError(f"unknown behavior scenario: {name}")
 
 
@@ -338,3 +341,97 @@ def _eye_reaction_cycle(
         for phase_name, duration, cue in sequence
     )
     return BehaviorScenario("eye_reaction_cycle", phases)
+
+
+def _mood_eye_validation(
+    moods: tuple[str, ...],
+    performances: dict[str, PerformanceCue],
+) -> BehaviorScenario:
+    """Exercise each authored mood eye type through key interaction/reaction states."""
+    if not moods:
+        raise ValueError("mood_eye_validation requires at least one mood")
+
+    neutral = _require_cue(performances, "neutral")
+    playful = _require_cue(performances, "playful")
+    emphatic = _require_cue(performances, "emphatic")
+    uncertain = _require_cue(performances, "uncertain")
+
+    phases: list[ScenarioPhase] = []
+    for mood in moods:
+        phases.extend(
+            (
+                ScenarioPhase(
+                    f"{mood}__listening",
+                    0.6,
+                    _phase_state(
+                        mood=mood,
+                        performance=neutral,
+                        person=True,
+                        listening=True,
+                        thinking=False,
+                        speaking=False,
+                    ),
+                ),
+                ScenarioPhase(
+                    f"{mood}__thinking",
+                    0.6,
+                    _phase_state(
+                        mood=mood,
+                        performance=neutral,
+                        person=True,
+                        listening=False,
+                        thinking=True,
+                        speaking=False,
+                    ),
+                ),
+                ScenarioPhase(
+                    f"{mood}__speaking_neutral",
+                    0.5,
+                    _phase_state(
+                        mood=mood,
+                        performance=neutral,
+                        person=True,
+                        listening=False,
+                        thinking=False,
+                        speaking=True,
+                    ),
+                ),
+                ScenarioPhase(
+                    f"{mood}__speaking_playful",
+                    0.8,
+                    _phase_state(
+                        mood=mood,
+                        performance=playful,
+                        person=True,
+                        listening=False,
+                        thinking=False,
+                        speaking=True,
+                    ),
+                ),
+                ScenarioPhase(
+                    f"{mood}__speaking_emphatic",
+                    0.8,
+                    _phase_state(
+                        mood=mood,
+                        performance=emphatic,
+                        person=True,
+                        listening=False,
+                        thinking=False,
+                        speaking=True,
+                    ),
+                ),
+                ScenarioPhase(
+                    f"{mood}__speaking_uncertain",
+                    0.8,
+                    _phase_state(
+                        mood=mood,
+                        performance=uncertain,
+                        person=True,
+                        listening=False,
+                        thinking=False,
+                        speaking=True,
+                    ),
+                ),
+            )
+        )
+    return BehaviorScenario("mood_eye_validation", tuple(phases))
