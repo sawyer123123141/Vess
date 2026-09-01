@@ -101,10 +101,13 @@ class RecordingVoice:
     def __init__(self) -> None:
         self.clauses: list[str] = []
 
-    def enqueue(self, text: str) -> None:
+    def begin_generation(self, generation_id: int) -> None:
+        pass
+
+    def enqueue(self, text: str, generation_id: int | None = None) -> None:
         self.clauses.append(text)
 
-    def enqueue_acknowledgement(self) -> None:
+    def enqueue_acknowledgement(self, generation_id: int | None = None) -> None:
         self.clauses.append("Yeah?")
 
 
