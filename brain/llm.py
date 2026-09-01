@@ -7,10 +7,12 @@ import queue
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
+from dataclasses import dataclass
 from typing import Any
 from urllib import request as url_request
 
 from brain.memory import append_conversation_turn, recent_conversation_turns
+from performance import PerformanceCue, cue_for_label
 
 
 _IDENTITY_PROMPT = (
@@ -31,6 +33,14 @@ _IDENTITY_PROMPT = (
 _SOFT_CLAUSE_CHARS = 120
 _HARD_CLAUSE_CHARS = 180
 _MIN_COMMA_CLAUSE_CHARS = 60
+_PERFORMANCE_PREFIX = "[[vess:"
+_STRONG_BOUNDARIES = ".!?\n"
+
+
+@dataclass(frozen=True)
+class SpeechClause:
+    text: str
+    performance: PerformanceCue
 
 
 def build_prompt(
@@ -38,6 +48,8 @@ def build_prompt(
     moods: dict[str, dict[str, Any]],
     state: Any,
     request: str,
+    *,
+    performances: dict[str, dict[str, object]] | None = None,
 ) -> str:
     """Build the cache-friendly identity, recent context, and current request."""
     with state.locked():
@@ -62,16 +74,21 @@ def build_prompt(
     if mood_instruction:
         mood_line += f" {mood_instruction}"
 
-    sections = [
-        _IDENTITY_PROMPT,
-        (
-            "Current state:\n"
-            f"Persona: {persona}. {persona_instruction}\n"
-            f"{mood_line}\n"
-            f"Room: {presence}\n"
-            f"Visible objects: {seen_objects}"
-        ),
-    ]
+    sections = [_IDENTITY_PROMPT]
+    if performances:
+        tags = ", ".join(f"[[vess:{name}]]" for name in performances)
+        sections.append(
+            "Response format: Prefix every sentence with exactly one tag from:\n"
+            f"{tags}.\n"
+            "Choose how that sentence should be delivered. Do not explain or mention the tag."
+        )
+    sections.append(
+        "Current state:\n"
+        f"Persona: {persona}. {persona_instruction}\n"
+        f"{mood_line}\n"
+        f"Room: {presence}\n"
+        f"Visible objects: {seen_objects}"
+    )
     if turns:
         history_lines = ["Recent conversation:"]
         for turn in turns:
@@ -82,21 +99,88 @@ def build_prompt(
     return "\n\n".join(sections)
 
 
-def split_clauses(chunks: Iterable[str]) -> Iterator[str]:
-    """Yield natural speech clauses as Ollama response chunks arrive."""
+def split_clauses(
+    chunks: Iterable[str],
+    performances: dict[str, dict[str, object]] | None = None,
+) -> Iterator[SpeechClause]:
+    """Yield cleaned natural speech clauses with sentence-level performance cues."""
+    definitions = performances or {}
     pending = ""
+    current_cue = PerformanceCue()
+    needs_cue = True
+
     for chunk in chunks:
         pending += chunk
         while True:
+            if needs_cue:
+                parsed = _consume_performance_prefix(pending, definitions)
+                if parsed is None:
+                    break
+                pending, current_cue = parsed
+                needs_cue = False
+
             end = _clause_end(pending)
             if end is None:
                 break
-            clause = pending[: end + 1].strip()
+
+            boundary = pending[end]
+            clean_text = pending[: end + 1].strip()
             pending = pending[end + 1 :]
-            if clause:
-                yield clause
+            if clean_text:
+                yield SpeechClause(clean_text, current_cue)
+
+            if boundary in _STRONG_BOUNDARIES:
+                current_cue = PerformanceCue()
+                needs_cue = True
+
+    if needs_cue:
+        pending, current_cue = _finish_performance_prefix(pending, definitions)
     if pending.strip():
-        yield pending.strip()
+        yield SpeechClause(pending.strip(), current_cue)
+
+
+def _consume_performance_prefix(
+    text: str,
+    definitions: dict[str, dict[str, object]],
+) -> tuple[str, PerformanceCue] | None:
+    """Consume one complete reserved marker, or wait if a marker is fragmented."""
+    stripped = text.lstrip()
+    if not stripped:
+        return None
+
+    if _PERFORMANCE_PREFIX.startswith(stripped) and len(stripped) < len(_PERFORMANCE_PREFIX):
+        return None
+
+    if stripped.startswith(_PERFORMANCE_PREFIX):
+        closing = stripped.find("]]", len(_PERFORMANCE_PREFIX))
+        if closing < 0:
+            return None
+        label = stripped[len(_PERFORMANCE_PREFIX) : closing].strip().lower()
+        remaining = stripped[closing + 2 :].lstrip()
+        return remaining, cue_for_label(label, definitions)
+
+    return stripped, PerformanceCue()
+
+
+def _finish_performance_prefix(
+    text: str,
+    definitions: dict[str, dict[str, object]],
+) -> tuple[str, PerformanceCue]:
+    """Finish end-of-stream marker handling without ever speaking reserved metadata."""
+    stripped = text.lstrip()
+    if not stripped:
+        return "", PerformanceCue()
+
+    if stripped.startswith(_PERFORMANCE_PREFIX):
+        closing = stripped.find("]]", len(_PERFORMANCE_PREFIX))
+        if closing >= 0:
+            label = stripped[len(_PERFORMANCE_PREFIX) : closing].strip().lower()
+            return stripped[closing + 2 :].lstrip(), cue_for_label(label, definitions)
+
+        parts = stripped.split(None, 1)
+        return (parts[1] if len(parts) == 2 else ""), PerformanceCue()
+
+    return stripped, PerformanceCue()
 
 
 class OllamaClient:
@@ -191,9 +275,12 @@ class ConversationWorker:
         event_log: Any,
         client: OllamaClient,
         voice: Any,
+        *,
+        performances: dict[str, dict[str, object]] | None = None,
     ) -> None:
         self._config = config
         self._moods = moods
+        self._performances = performances
         self._state = state
         self._event_log = event_log
         self._client = client
@@ -292,10 +379,19 @@ class ConversationWorker:
             generation_id=generation_id,
         )
         try:
-            prompt = build_prompt(self._config, self._moods, self._state, user_request)
+            prompt = build_prompt(
+                self._config,
+                self._moods,
+                self._state,
+                user_request,
+                performances=self._performances,
+            )
             first_clause = True
             spoken_clauses: list[str] = []
-            for clause in split_clauses(self._client.stream(prompt, self._config)):
+            for clause in split_clauses(
+                self._client.stream(prompt, self._config),
+                self._performances,
+            ):
                 if not self._is_latest(generation_id):
                     self._state.record_debug(
                         "stale_response_cancelled",
@@ -310,13 +406,21 @@ class ConversationWorker:
                     self._state.update_debug(llm_first_clause_ms=rounded)
                     self._state.record_debug(
                         "llm_first_clause",
-                        clause=clause,
+                        clause=clause.text,
+                        performance=clause.performance.expression,
                         latency_ms=rounded,
                         generation_id=generation_id,
                     )
                     first_clause = False
-                spoken_clauses.append(clause)
-                self._voice.enqueue(clause, generation_id=generation_id)
+                spoken_clauses.append(clause.text)
+                if self._performances is None:
+                    self._voice.enqueue(clause.text, generation_id=generation_id)
+                else:
+                    self._voice.enqueue(
+                        clause.text,
+                        generation_id=generation_id,
+                        performance=clause.performance,
+                    )
 
             if not self._remember_completed_turn(
                 generation_id,
@@ -420,7 +524,7 @@ def _request_key(value: str) -> str:
 
 def _clause_end(text: str) -> int | None:
     """Choose a natural streamed speech boundary without letting buffers grow forever."""
-    strong = _first_index(text, ".!?\n")
+    strong = _first_index(text, _STRONG_BOUNDARIES)
     if strong is not None and strong < _SOFT_CLAUSE_CHARS:
         return strong
 
