@@ -20,6 +20,22 @@ _SHAPE_LIMITS = {
     "r_cy": (-1.5, 1.5),
 }
 
+_EYE_MOTION_LIMITS = {
+    "l_x": (-1.5, 1.5),
+    "l_y": (-1.5, 1.5),
+    "r_x": (-1.5, 1.5),
+    "r_y": (-1.5, 1.5),
+    "reaction": (0.0, 1.0),
+}
+
+_EYE_MOTION_DEFAULTS = {
+    "l_x": 0.0,
+    "l_y": 0.0,
+    "r_x": 0.0,
+    "r_y": 0.0,
+    "reaction": 0.0,
+}
+
 _MOVEMENT_LIMITS = {
     "hold_scale": (0.6, 1.6),
     "ease_scale": (0.7, 1.5),
@@ -71,6 +87,22 @@ def load_performance_definitions(
             for key, (low, high) in _SHAPE_LIMITS.items()
         }
 
+        eye_motion_value = entry.get("eye_motion", {})
+        eye_motion_raw = eye_motion_value if isinstance(eye_motion_value, dict) else {}
+        eye_motion = {
+            key: _clamp(
+                _number(
+                    eye_motion_raw.get(key, _EYE_MOTION_DEFAULTS[key]),
+                    _EYE_MOTION_DEFAULTS[key],
+                ),
+                low,
+                high,
+            )
+            for key, (low, high) in _EYE_MOTION_LIMITS.items()
+        }
+        if name == "neutral":
+            eye_motion = dict(_EYE_MOTION_DEFAULTS)
+
         movement_value = entry.get("movement", {})
         movement_raw = movement_value if isinstance(movement_value, dict) else {}
         movement = {
@@ -85,6 +117,7 @@ def load_performance_definitions(
         cleaned[name] = {
             "intensity": intensity,
             "shape": shape,
+            "eye_motion": eye_motion,
             "movement": movement,
         }
 
