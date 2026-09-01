@@ -28,6 +28,7 @@
     "min_utterance_seconds": 0.25,
     "silence_seconds": 0.8,
     "max_utterance_seconds": 15.0,
+    "pre_roll_seconds": 0.25,
     "wake_variants": ["hey vess", "hey best", "hey guess", "heaviest"],
     "wake_max_distance": 2
   },
