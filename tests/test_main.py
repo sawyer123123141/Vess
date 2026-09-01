@@ -34,6 +34,11 @@ class MainTests(unittest.TestCase):
             [("mood_changed", {"from": "annoyed", "to": "neutral"})],
         )
 
+    def test_repository_performance_config_contains_neutral(self) -> None:
+        performances = main._load_performances()
+
+        self.assertIn("neutral", performances)
+
 
 class RecordingLog:
     def __init__(self) -> None:
