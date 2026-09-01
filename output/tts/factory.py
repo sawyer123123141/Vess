@@ -14,4 +14,8 @@ def create_tts_engine(config: dict[str, Any]) -> TTSEngine:
         from output.tts.kokoro import KokoroEngine
 
         return KokoroEngine(config)
+    if name == "chatterbox_turbo":
+        from output.tts.chatterbox_turbo import ChatterboxTurboEngine
+
+        return ChatterboxTurboEngine(config)
     raise ValueError(f"unknown TTS engine: {name!r}")
