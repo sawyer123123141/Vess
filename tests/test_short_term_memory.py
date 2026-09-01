@@ -22,6 +22,31 @@ class ShortTermMemoryTests(unittest.TestCase):
         self.assertEqual(turn.timestamp, 100.0)
         self.assertEqual(turn.user, "How was your day?")
         self.assertEqual(turn.assistant, "Pretty quiet so far.")
+        self.assertEqual(turn.status, "completed")
+        self.assertIsNone(turn.interrupted_clause)
+        self.assertEqual(state.conversation_turns, [turn])
+
+    def test_append_records_interrupted_turn_without_claiming_partial_clause_was_heard(self) -> None:
+        state = State()
+
+        turn = append_conversation_turn(
+            state,
+            "Explain rainbows",
+            "Light enters the droplet.",
+            timestamp=100.0,
+            max_age_seconds=600.0,
+            max_turns=8,
+            status="interrupted",
+            interrupted_clause="Then it bends and separates into colors.",
+        )
+
+        self.assertEqual(turn.user, "Explain rainbows")
+        self.assertEqual(turn.assistant, "Light enters the droplet.")
+        self.assertEqual(turn.status, "interrupted")
+        self.assertEqual(
+            turn.interrupted_clause,
+            "Then it bends and separates into colors.",
+        )
         self.assertEqual(state.conversation_turns, [turn])
 
     def test_recent_turns_prune_by_age_and_count(self) -> None:
