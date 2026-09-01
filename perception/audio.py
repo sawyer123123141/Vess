@@ -114,8 +114,11 @@ class AudioLoop:
         self._variants = list(settings.get("wake_variants", ["hey vess"]))
         self._max_distance = int(settings.get("wake_max_distance", 2))
         self._blocks: queue.Queue[np.ndarray | None] = queue.Queue(maxsize=16)
+        self._utterances: queue.Queue[np.ndarray | None] = queue.Queue()
         self._stop = threading.Event()
+        self._transcriber_failed = threading.Event()
         self._thread: threading.Thread | None = None
+        self._transcribe_thread: threading.Thread | None = None
         self._stream: Any = None
         self._assembler = UtteranceAssembler(
             int(settings.get("sample_rate", 16_000)),
@@ -188,7 +191,7 @@ class AudioLoop:
         self._thread.start()
 
     def close(self) -> None:
-        """Stop capture and wait for the audio worker to exit."""
+        """Stop capture and wait for the audio workers to exit."""
         self._stop.set()
         if self._stream is not None:
             self._stream.stop()
@@ -201,6 +204,9 @@ class AudioLoop:
                 pass
             self._thread.join()
             self._thread = None
+        if self._transcribe_thread is not None:
+            self._transcribe_thread.join()
+            self._transcribe_thread = None
 
     def _on_audio(self, indata: np.ndarray, *_: object) -> None:
         try:
@@ -209,31 +215,61 @@ class AudioLoop:
             pass
 
     def _run(self) -> None:
+        self._ensure_transcribe_thread()
+        try:
+            while not self._stop.is_set():
+                block = self._blocks.get()
+                if block is None:
+                    return
+                with self._state.locked():
+                    speaking = self._state.speaking
+                if speaking:
+                    self._state.update_debug(audio_ignored=True)
+                    continue
+                utterance = self._assembler.push(block)
+                peak = float(np.max(np.abs(block))) if block.size else 0.0
+                self._state.update_debug(
+                    audio_ignored=False,
+                    mic_peak=round(peak, 4),
+                    transcription_queue=self._utterances.qsize(),
+                    **self._assembler.status(),
+                )
+                if utterance is not None:
+                    if self._transcriber_failed.is_set():
+                        self._state.record_debug(
+                            "audio_dropped", reason="transcriber_unavailable"
+                        )
+                    else:
+                        self._utterances.put(utterance)
+        finally:
+            self._utterances.put(None)
+
+    def _ensure_transcribe_thread(self) -> None:
+        if self._transcribe_thread is not None:
+            return
+        self._transcribe_thread = threading.Thread(
+            target=self._run_transcription,
+            name="audio-transcribe",
+            daemon=True,
+        )
+        self._transcribe_thread.start()
+
+    def _run_transcription(self) -> None:
         if self._transcribe is None:
             try:
                 self._transcribe = _make_transcriber(self._config)
             except Exception as error:
+                self._transcriber_failed.set()
                 self._event_log.append("audio_error", {"error": str(error)})
                 self._state.record_debug("audio_error", error=str(error))
                 return
-        while not self._stop.is_set():
-            block = self._blocks.get()
-            if block is None:
+
+        while True:
+            utterance = self._utterances.get()
+            if utterance is None:
                 return
-            with self._state.locked():
-                speaking = self._state.speaking
-            if speaking:
-                self._state.update_debug(audio_ignored=True)
-                continue
-            utterance = self._assembler.push(block)
-            peak = float(np.max(np.abs(block))) if block.size else 0.0
-            self._state.update_debug(
-                audio_ignored=False,
-                mic_peak=round(peak, 4),
-                **self._assembler.status(),
-            )
-            if utterance is not None:
-                self.handle_utterance(utterance)
+            self._state.update_debug(transcription_queue=self._utterances.qsize())
+            self.handle_utterance(utterance)
 
 
 def match_wake_phrase(
