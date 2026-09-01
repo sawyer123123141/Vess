@@ -21,7 +21,8 @@
     "compute_type": "int8",
     "language": "en",
     "beam_size": 1,
-    "condition_on_previous_text": false
+    "condition_on_previous_text": false,
+    "vad_filter": true
   },
   "audio": {
     "device": null,
