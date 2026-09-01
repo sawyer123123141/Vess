@@ -41,6 +41,14 @@
     "wake_variants": ["hey vess", "hey best", "hey guess", "heaviest"],
     "wake_max_distance": 2
   },
+  "barge_in": {
+    "enabled": false,
+    "pause_after_speech_seconds": 0.25,
+    "false_interruption_timeout_seconds": 2.0,
+    "max_interruption_decision_seconds": 5.0,
+    "preprocessor": "passthrough",
+    "disable_on_preprocessor_error": true
+  },
   "voice": {
     "engine": "kokoro",
     "name": "af_heart",
