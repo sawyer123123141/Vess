@@ -5,8 +5,11 @@ import unittest
 
 import numpy as np
 
+from output.tts.base import SynthesisResult
 from output.voice import VoiceOutput
+from performance import PerformanceCue
 from state import State
+from tests.tts_fakes import FakeTTSEngine
 
 
 CONFIG = {
@@ -53,6 +56,49 @@ class VoiceOutputTests(unittest.TestCase):
                 "tts_complete",
             ],
         )
+
+    def test_engine_sample_rate_and_performance_reach_voice_pipeline(self) -> None:
+        played_rates: list[int] = []
+        cue = PerformanceCue("playful", 0.65)
+        engine = FakeTTSEngine(sample_rate=16_000)
+        voice = VoiceOutput(
+            CONFIG,
+            State(),
+            RecordingLog(),
+            engine=engine,
+            play=lambda audio, sample_rate: played_rates.append(sample_rate),
+        )
+
+        voice.start()
+        voice.enqueue("hello", performance=cue)
+        voice.close()
+
+        self.assertEqual(played_rates, [16_000])
+        self.assertEqual(engine.calls, [("hello", cue)])
+
+    def test_cached_acknowledgement_preserves_engine_sample_rate(self) -> None:
+        played_rates: list[int] = []
+        engine = FakeTTSEngine(
+            lambda text, performance: SynthesisResult(
+                np.ones(20, dtype=np.float32),
+                22_050,
+            )
+        )
+        voice = VoiceOutput(
+            CONFIG,
+            State(),
+            RecordingLog(),
+            engine=engine,
+            play=lambda audio, sample_rate: played_rates.append(sample_rate),
+        )
+
+        voice.start()
+        voice.prepare_acknowledgement("Ready?")
+        voice.enqueue_acknowledgement()
+        voice.close()
+
+        self.assertEqual(played_rates, [22_050])
+        self.assertEqual(engine.calls, [("Ready?", PerformanceCue())])
 
 
 class RecordingLog:
