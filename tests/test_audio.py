@@ -269,6 +269,7 @@ class TranscriberTests(unittest.TestCase):
                 "language": "en",
                 "beam_size": 1,
                 "condition_on_previous_text": False,
+                "vad_filter": True,
             }
         }
         with patch.dict(sys.modules, {"faster_whisper": fake_module}):
@@ -282,6 +283,7 @@ class TranscriberTests(unittest.TestCase):
                 "language": "en",
                 "beam_size": 1,
                 "condition_on_previous_text": False,
+                "vad_filter": True,
             },
         )
 
