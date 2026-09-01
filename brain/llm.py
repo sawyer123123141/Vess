@@ -10,7 +10,7 @@ from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 from urllib import request as url_request
 
-from brain.memory import recent_conversation_turns
+from brain.memory import append_conversation_turn, recent_conversation_turns
 
 
 _IDENTITY_PROMPT = (
@@ -42,9 +42,7 @@ def build_prompt(
         person_present = state.person_present
         objects = list(state.objects)
 
-    memory_settings = config.get("memory", {})
-    max_age_seconds = float(memory_settings.get("short_term_minutes", 10)) * 60.0
-    max_turns = int(memory_settings.get("short_term_turns", 8))
+    max_age_seconds, max_turns = _memory_limits(config)
     turns = recent_conversation_turns(
         state,
         max_age_seconds=max_age_seconds,
@@ -292,6 +290,7 @@ class ConversationWorker:
         try:
             prompt = build_prompt(self._config, self._moods, self._state, user_request)
             first_clause = True
+            spoken_clauses: list[str] = []
             for clause in split_clauses(self._client.stream(prompt, self._config)):
                 if not self._is_latest(generation_id):
                     self._state.record_debug(
@@ -312,9 +311,14 @@ class ConversationWorker:
                         generation_id=generation_id,
                     )
                     first_clause = False
+                spoken_clauses.append(clause)
                 self._voice.enqueue(clause, generation_id=generation_id)
 
-            if not self._is_latest(generation_id):
+            if not self._remember_completed_turn(
+                generation_id,
+                user_request,
+                spoken_clauses,
+            ):
                 self._state.record_debug(
                     "stale_response_cancelled",
                     generation_id=generation_id,
@@ -335,6 +339,37 @@ class ConversationWorker:
         finally:
             with self._state.locked():
                 self._state.thinking = False
+
+    def _remember_completed_turn(
+        self,
+        generation_id: int,
+        user_request: str,
+        spoken_clauses: list[str],
+    ) -> bool:
+        assistant_response = " ".join(spoken_clauses).strip()
+        with self._request_lock:
+            if generation_id != self._latest_generation:
+                return False
+            if not assistant_response:
+                return True
+
+            max_age_seconds, max_turns = _memory_limits(self._config)
+            append_conversation_turn(
+                self._state,
+                user_request,
+                assistant_response,
+                max_age_seconds=max_age_seconds,
+                max_turns=max_turns,
+            )
+            self._event_log.append(
+                "conversation_turn",
+                {"user": user_request, "assistant": assistant_response},
+            )
+
+        with self._state.locked():
+            remembered_turns = len(self._state.conversation_turns)
+        self._state.update_debug(short_term_turns=remembered_turns)
+        return True
 
     def _is_latest(self, generation_id: int) -> bool:
         with self._request_lock:
@@ -362,6 +397,13 @@ class ConversationWorker:
         self._state.record_debug(
             "mood_changed", previous_mood=previous_mood, mood=mood
         )
+
+
+def _memory_limits(config: dict[str, Any]) -> tuple[float, int]:
+    settings = config.get("memory", {})
+    max_age_seconds = float(settings.get("short_term_minutes", 10)) * 60.0
+    max_turns = int(settings.get("short_term_turns", 8))
+    return max_age_seconds, max_turns
 
 
 def _request_key(value: str) -> str:
