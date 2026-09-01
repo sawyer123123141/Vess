@@ -355,7 +355,12 @@ def _trim_waveform_edges(
     keep_leading_ms: float = 100.0,
     keep_trailing_ms: float = 160.0,
 ) -> np.ndarray:
-    """Trim only excess near-silence while preserving generous speech margins."""
+    """Trim only excess near-silence while preserving generous speech margins.
+
+    The same conservative threshold used by diagnostics finds a confident speech
+    edge, then extra audio is kept around that edge so quiet consonants or breathy
+    starts are not cut merely because they stay below the threshold briefly.
+    """
     samples = np.asarray(audio, dtype=np.float32).reshape(-1)
     if samples.size == 0 or sample_rate <= 0:
         return samples
