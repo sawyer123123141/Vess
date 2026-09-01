@@ -87,7 +87,7 @@ class LlmTests(unittest.TestCase):
             "num_predict": 80,
         })
 
-    def test_conversation_streams_clauses_and_logs_valid_mood_change(self) -> None:
+    def test_conversation_streams_clauses_remembers_turn_and_logs_valid_mood_change(self) -> None:
         state = State()
         voice = RecordingVoice()
         log = RecordingLog()
@@ -105,12 +105,25 @@ class LlmTests(unittest.TestCase):
         worker.close()
 
         self.assertEqual(voice.clauses, ["First,", "then second."])
+        self.assertEqual(
+            [(turn.user, turn.assistant) for turn in state.conversation_turns],
+            [("Tell me something", "First, then second.")],
+        )
         self.assertEqual(state.mood, "annoyed")
         self.assertGreater(state.mood_until, 0.0)
         self.assertFalse(state.thinking)
         self.assertEqual(
             log.events,
-            [("mood_changed", {"from": "neutral", "to": "annoyed"})],
+            [
+                (
+                    "conversation_turn",
+                    {
+                        "user": "Tell me something",
+                        "assistant": "First, then second.",
+                    },
+                ),
+                ("mood_changed", {"from": "neutral", "to": "annoyed"}),
+            ],
         )
         events = state.debug_snapshot()["events"]
         self.assertEqual(
