@@ -6,19 +6,17 @@
 
 ## Goal
 
-Give Vess more personality by allowing the left and right eye bodies to move independently, while preserving the existing separation between pupil gaze, eye shape, and whole-face motion.
+Give Vess more personality by allowing the left and right **eye bodies** to move independently, while keeping pupil gaze, eye shape, and whole-face motion as separate systems.
 
-The system must make eye movement feel intentional and conversational rather than constantly animated. Independent eye translation is a transient expression layer, not a replacement for gaze tracking or authored eye geometry.
+Independent eye motion should feel like a reaction, not constant animation.
 
 ## Core Model
 
-Vess will have three separate movement channels:
+Vess has three distinct movement channels:
 
 1. **Pupil gaze** — where Vess is looking.
-2. **Independent eye motion** — how Vess is reacting right now.
+2. **Independent eye motion** — how Vess is reacting.
 3. **Whole-face motion** — Vess's body-language equivalent.
-
-These channels compose but do not overwrite one another.
 
 For each eye:
 
@@ -29,13 +27,15 @@ final eye center
 + whole-face offset
 ```
 
-Pupil position remains relative to the final eye body and continues to be driven by gaze.
+Pupil motion remains relative to that final eye body.
 
-## Why This Architecture
+## Why a Separate Eye-Offset Layer
 
-The existing eye centers (`l_cx`, `l_cy`, `r_cx`, `r_cy`) define authored geometry and the intentionally asymmetric identity of Vess's eyes. Temporary reactions must not mutate those baseline values directly.
+The current `l_cx/l_cy/r_cx/r_cy` values are authored geometry. They define the deliberately asymmetric identity of Vess's eyes and are already interpolated by mood/performance shape changes.
 
-Independent offsets therefore become a distinct animation layer:
+Temporary reactions must not rewrite those baseline centers.
+
+Composition therefore becomes:
 
 ```text
 base eye geometry
@@ -43,31 +43,31 @@ base eye geometry
   -> performance shape overlay
   -> independent eye translation
   -> whole-face translation
-  -> pupil gaze
+  -> pupil gaze inside translated eye
   -> renderer
 ```
 
-This keeps configuration, rendering, diagnostics, and future tuning understandable.
-
 ## Non-Goals
 
-This version will not add:
+V1 does **not** add:
 
 - per-eye rotation matrices;
 - arbitrary per-eye scale transforms;
-- audio-amplitude-driven bouncing;
-- movement on every spoken word;
-- continuous random independent jitter;
-- eye-body tracking of the user's position;
+- audio-amplitude bouncing;
+- movement on every word;
+- random independent eye jitter;
+- eye-body user tracking;
 - new LLM performance labels;
-- a new inference/model call;
+- another model/inference call;
 - expressive TTS changes.
 
-The existing shape system already handles height, slant, arc, and authored geometry. V1 only adds translation and reaction timing.
+Existing shape fields continue handling height, slant, arc, and authored geometry. V1 adds only independent translation plus reaction timing.
 
 ## Rendering Interface
 
-`output/face.py` currently accepts one whole-face `offset` shared by both eyes. Extend rendering to also accept independent offsets:
+Extend `output/face.py` so the renderer can receive independent eye offsets in addition to the existing shared face offset.
+
+Conceptual interface:
 
 ```python
 render(
@@ -81,250 +81,122 @@ render(
 )
 ```
 
-A clearer named structure may be used in implementation if it keeps call sites simple, but the semantics are fixed:
+A named structure may be used if implementation clarity improves, but semantics are fixed:
 
 ```text
-left eye = base left center + left eye offset + face offset
-right eye = base right center + right eye offset + face offset
+left center  = l_cx/l_cy + left eye offset  + face offset
+right center = r_cx/r_cy + right eye offset + face offset
 ```
 
-`_eye(...)` receives its own local eye offset in addition to the whole-face offset.
+Default zero eye offsets must produce **byte-for-byte identical frames** to the pre-feature renderer for identical inputs.
 
-Default zero eye offsets must produce byte-for-byte equivalent frames to the current renderer for the same inputs.
+## Ownership
 
-## Motion State
-
-`FaceAnimator` owns all eye-motion timing. `State` remains unaware of individual pixel offsets.
-
-The animator maintains:
+`FaceAnimator` owns:
 
 ```text
-left eye current offset (x, y)
-right eye current offset (x, y)
-left/right target offsets
-reaction phase/progress
-previous performance cue identity
+left/right current eye offset
+left/right settled target
+left/right reaction target
+reaction phase
+reaction elapsed time
+active performance expression
 ```
 
-No other component writes these values.
+`State` does not store pixel offsets.
 
-`FaceAnimator.debug_snapshot()` exposes the exact independent offsets used for the most recent rendered frame.
+No component other than `FaceAnimator` mutates eye-motion state.
 
-## Motion Limits
+## Hard Motion Limits
 
-V1 uses conservative hard limits because the face is only 64x64:
+Because the display is 64x64:
 
 ```text
 left/right X offset: [-1.5, +1.5] px
 left/right Y offset: [-1.5, +1.5] px
 ```
 
-These are safety bounds, not target values. Most authored expressions should use substantially less than one pixel.
+These are safety limits, not normal authored values. Most configured offsets should remain below one pixel.
 
-Subpixel values are intentional. The renderer's distance-field edge coverage allows subpixel translation to appear as smooth brightness changes rather than whole-pixel jumps.
+Subpixel translation is intentional because the distance-field renderer already converts fractional movement into smooth edge-brightness changes.
 
 ## Performance Configuration
 
-Extend each performance definition with an optional `eye_motion` block.
-
-Example shape only:
+Each performance may optionally define:
 
 ```json
-{
-  "playful": {
-    "intensity": 0.65,
-    "shape": {},
-    "eye_motion": {
-      "l_x": -0.15,
-      "l_y": 0.25,
-      "r_x": 0.30,
-      "r_y": -0.65,
-      "reaction": 0.8
-    },
-    "movement": {}
-  }
+"eye_motion": {
+  "l_x": -0.15,
+  "l_y": 0.25,
+  "r_x": 0.30,
+  "r_y": -0.65,
+  "reaction": 0.8
 }
 ```
 
-The example numbers are illustrative and are not acceptance values.
+The numbers above are illustrative, not final tuning values.
 
-### Eye-motion fields
-
-```text
-l_x, l_y
-r_x, r_y
-reaction
-```
-
-`l_x/l_y/r_x/r_y` are target translation deltas in pixels before cue-intensity scaling.
-
-`reaction` is a normalized reaction-strength value in `[0, 1]`. It controls how much transient overshoot occurs when entering the performance cue. It does not change the final settled target.
-
-Missing `eye_motion` means all-zero offsets and zero reaction strength.
-
-## Validation
-
-`performance.py` validates the new block exactly like the existing shape and movement blocks.
-
-Hard config limits:
+Fields:
 
 ```text
-l_x, l_y, r_x, r_y: [-1.5, +1.5]
-reaction: [0.0, 1.0]
+l_x, l_y, r_x, r_y: settled translation before cue-intensity scaling
+reaction: overshoot strength in [0, 1]
 ```
 
-Malformed, NaN, or infinite values fall back to neutral defaults rather than breaking startup.
-
-The required `neutral` performance must always resolve to zero independent eye translation and zero reaction strength.
-
-## Intensity Composition
-
-Performance eye targets are scaled by the active cue intensity:
+Missing `eye_motion` means:
 
 ```text
-settled_offset = configured_offset * cue.intensity
+l_x = l_y = r_x = r_y = 0
+reaction = 0
 ```
 
-This mirrors the existing performance shape-overlay behavior.
+### Validation
 
-The transient reaction/overshoot is also bounded by cue intensity so a low-intensity performance cannot generate a stronger physical reaction than a high-intensity one.
-
-## Reaction Curve
-
-Eye translation must not snap when a performance starts or ends.
-
-V1 uses a deterministic two-stage response:
-
-### Entry
-
-1. Start from the current independent offsets.
-2. Ease quickly toward a small overshoot target.
-3. Ease back into the settled performance target.
-
-Conceptually:
+`performance.py` validates:
 
 ```text
-baseline/current
- -> brief overshoot
- -> settled performance target
+l_x/l_y/r_x/r_y: clamp to [-1.5, +1.5]
+reaction: clamp to [0, 1]
 ```
 
-The overshoot magnitude is derived from `reaction` and is capped. The implementation must never exceed the hard ±1.5 px eye-offset limits.
+Malformed, NaN, or infinite values use neutral defaults rather than preventing startup.
 
-### Hold
+`neutral` must always resolve to zero performance eye offsets and zero reaction strength.
 
-After settling, the eye bodies remain near the performance target. There is no continuous eye-body jitter.
+## Cue Intensity
 
-### Release
-
-When the cue ends or changes to neutral, both independent offsets ease smoothly back toward zero.
-
-### Cue-to-cue transition
-
-When performance changes directly from one non-neutral cue to another, the animator transitions from the current rendered offsets toward the new cue. It must not force an intermediate neutral frame.
-
-## Timing
-
-V1 uses fixed animator-owned timing rather than per-performance arbitrary durations.
-
-Initial design targets:
+Performance settled target:
 
 ```text
-entry reaction: roughly 100-200 ms
-settle: roughly 150-300 ms total from cue start
-release: roughly 150-300 ms
+configured eye offset * cue.intensity
 ```
 
-These are design ranges, not exact frame assertions. Exact constants are implementation details to be tuned using the generated preview and numeric traces.
-
-The verification suite should measure actual settle/release times but initially treat them as review metrics, not hard CI thresholds unless a safety/lifecycle requirement is violated.
+The reaction component is also scaled by cue intensity.
 
 ## Interaction-Mode Contribution
 
-Independent eye translation is driven primarily by performance cues. Interaction modes may add small deterministic offsets, but they remain subordinate to the distinction between gaze and expression.
+V1 deliberately keeps mode-driven eye-body movement minimal so gaze, face lean, and eye translation do not all chase the same target.
 
-### Idle
-
-- Eye bodies normally remain near baseline.
-- Rare existing face/pupil activity provides life without independent-eye noise.
-- V1 does not add random per-eye idle jitter.
-
-### Tracking
-
-- Eye bodies remain near baseline.
-- Pupil gaze and whole-face lean continue to perform tracking.
-
-### Listening
-
-- Eye bodies settle and remain comparatively stable.
-- No independent wandering while Vess is listening.
-- A tiny shared engagement bias may be used only if visual testing proves useful; V1 does not require one.
-
-### Thinking
-
-- Both eye bodies may shift slightly upward.
-- The two offsets should not be mathematically identical, preserving Vess's asymmetry.
-- Pupil thinking gaze remains independently controlled.
-
-### Speaking
-
-- Eye bodies are primarily driven by the active performance cue.
-- Existing speaking gaze breaks remain pupil/gaze behavior and do not automatically move the eye bodies.
-
-## Initial Expression Intent
-
-The exact pixel constants are tuning data, not architecture, but the intended motion relationships are fixed:
-
-### Neutral
+The fixed mode contribution is:
 
 ```text
-L = (0, 0)
-R = (0, 0)
+idle:      L (0.00,  0.00)   R (0.00,  0.00)
+tracking:  L (0.00,  0.00)   R (0.00,  0.00)
+listening: L (0.00,  0.00)   R (0.00,  0.00)
+thinking:  L (0.00, -0.12)   R (0.00, -0.22)
+speaking:  L (0.00,  0.00)   R (0.00,  0.00)
 ```
 
-### Curious
+Positive Y is down, so thinking raises both eye bodies slightly, with the right eye moving more.
 
-- both eyes may lift slightly;
-- right eye lifts more than left;
-- motion reinforces the already-asymmetric curious shape.
+There is **no mode overshoot** in V1.
 
-### Amused
+Why:
 
-- restrained inward/downward settling;
-- asymmetry should remain subtle.
-
-### Playful
-
-- strongest asymmetry among normal conversational cues;
-- one eye may lift/outward while the other shifts slightly opposite;
-- brief reaction overshoot is appropriate.
-
-### Emphatic
-
-- both eyes move in a more coordinated direction;
-- less asymmetry than playful;
-- reaction can be quick but must remain small.
-
-### Thoughtful
-
-- upward bias with slower-feeling settle;
-- eyes may differ slightly in vertical offset.
-
-### Sympathetic
-
-- slight down/inward settling;
-- low reaction strength.
-
-### Uncertain
-
-- asymmetric vertical change;
-- one eye moves more than the other.
-
-These are visual intentions only. Configuration values will be tuned against CI-generated previews rather than guessed once and declared correct.
-
-## Priority and Composition
-
-Independent eye translation does not introduce a new interaction priority stack.
+- person tracking stays pupil/whole-face driven;
+- listening remains visually settled;
+- thinking gets a small real eye-body gesture instead of only a pupil glance;
+- speech expression comes primarily from performance cues.
 
 Existing mode priority remains:
 
@@ -332,58 +204,197 @@ Existing mode priority remains:
 listening > thinking > speaking > tracking > idle
 ```
 
-Composition order for independent offsets:
+## Settled Target Composition
+
+Per eye:
 
 ```text
-mode contribution
-+ performance contribution
-+ transient reaction component
-= independent eye offset
+settled target
+= fixed interaction-mode contribution
++ performance eye target
 ```
 
-The final result is hard-clamped before rendering.
+Then clamp to ±1.5 px per axis.
 
-Performance remains the main expressive contributor during speech. Mode contribution must be small enough that it cannot erase a performance's intended asymmetry.
+Performance does not replace the thinking contribution; the two compose.
+
+## Reaction Trigger Rules
+
+A new reaction begins when the **performance expression name changes** to a non-neutral expression.
+
+Examples:
+
+```text
+neutral -> playful      reaction
+playful -> emphatic     reaction from current rendered position
+playful -> neutral      release only, no overshoot
+```
+
+Changing only the intensity while the expression name remains the same retargets smoothly but does **not** start another overshoot.
+
+Blink events, gaze breaks, and interaction-mode changes do not trigger performance overshoot.
+
+## Deterministic Reaction Curve
+
+The reaction is piecewise and deterministic rather than random.
+
+Constants for V1:
+
+```text
+reaction leg: 0.12 s
+settle leg:   0.16 s
+release:      0.22 s
+max overshoot factor: 0.15
+```
+
+### Entry/cue-change
+
+When a non-neutral performance expression starts:
+
+```text
+start = current rendered eye offset
+settled = newly composed settled target
+delta = settled - start
+overshoot = settled + delta * (0.15 * reaction * cue.intensity)
+```
+
+Clamp `overshoot` to hard eye-offset limits.
+
+Then:
+
+```text
+0.00 -> 0.12 s: smoothstep(start, overshoot)
+0.12 -> 0.28 s: smoothstep(overshoot, settled)
+```
+
+This means overshoot follows the direction of the actual transition rather than simply scaling coordinates away from zero.
+
+### Hold
+
+After 0.28 s, target the settled offset directly. No random eye-body jitter is added.
+
+### Release to neutral
+
+When performance becomes neutral:
+
+```text
+start = current rendered eye offset
+settled = current mode contribution
+0.00 -> 0.22 s: smoothstep(start, settled)
+```
+
+No overshoot is used on release.
+
+### Mode changes during a cue
+
+If the interaction mode changes while a performance cue remains active, recompute the settled target and ease toward it without restarting the performance reaction.
+
+### Direct cue-to-cue transitions
+
+A cue change such as `playful -> emphatic` starts from the **current rendered eye position** and heads directly toward the new cue's overshoot/settled target. There is no forced neutral frame.
+
+## Initial Performance Intent
+
+Exact config values are tuning data, but directional relationships are fixed.
+
+### Neutral
+
+```text
+performance contribution: L (0,0), R (0,0)
+```
+
+### Curious
+
+- both eyes lift;
+- right lifts more than left;
+- low-to-medium reaction.
+
+### Amused
+
+- restrained asymmetric settling;
+- low reaction.
+
+### Playful
+
+- strongest normal conversational asymmetry;
+- eyes move in slightly opposing directions;
+- medium/high reaction.
+
+### Emphatic
+
+- more coordinated movement than playful;
+- quick but small reaction.
+
+### Thoughtful
+
+- slight upward bias;
+- low reaction, letting the fixed thinking-mode lift do most of the work when applicable.
+
+### Sympathetic
+
+- slight down/inward feeling;
+- low reaction.
+
+### Uncertain
+
+- asymmetric vertical movement;
+- medium reaction.
+
+Final pixel values are tuned from CI-generated GIFs and traces, not treated as architectural constants.
 
 ## Blink Interaction
 
-Blink openness and independent translation remain separate.
+Blink and independent translation are separate.
 
 During a blink:
 
-- eye bodies continue following their current offsets;
-- translation does not reset;
-- a blink must not trigger a new reaction;
-- reopening resumes at the same continuous motion state.
+- eye offsets continue advancing normally;
+- offsets are not reset;
+- blink start/end does not trigger a new reaction;
+- reopening uses the continuously updated offset.
 
-This prevents eyes from visibly teleporting when a blink closes.
+A blink therefore cannot cause the eyes to teleport.
 
 ## Gaze Interaction
 
-Pupil gaze remains relative to the independently translated eye body.
-
-Independent eye movement must not alter the normalized gaze values.
-
-Therefore:
+Independent eye translation must not modify normalized gaze values.
 
 ```text
-eye offset changes eye-body position
-pupil gaze changes pupil position inside that body
+eye offset = body position
+gaze = pupil position inside that body
 ```
 
-A test must prove that applying identical gaze with different eye offsets changes the eye body's panel position without changing the gaze input or relative pupil direction.
+With identical gaze inputs, changing eye offsets should move the whole eye body while preserving the pupil's relative gaze direction.
 
 ## Whole-Face Interaction
 
-Whole-face movement is added after independent eye movement.
+Both eyes still receive the same whole-face offset after their local eye offsets are calculated.
 
-Both eyes receive the same whole-face offset, while each keeps its own local eye offset.
+```text
+local eye reaction
++ shared face lean/bob
+```
 
-This preserves the existing face lean/bob behavior while allowing reactions within that moving frame of reference.
+This preserves existing face motion.
 
-## Debug and Trace Integration
+## Debug Snapshot
 
-The remote verification schema already contains:
+`FaceAnimator.debug_snapshot()` adds exact render-time values:
+
+```text
+left_eye_offset
+right_eye_offset
+left_eye_settled_target
+right_eye_settled_target
+reaction_phase
+reaction_elapsed
+```
+
+The values called `left_eye_offset/right_eye_offset` must be the clamped values actually sent to the renderer.
+
+## Verification Trace
+
+The existing fields:
 
 ```text
 left_eye_offset_x
@@ -392,106 +403,105 @@ right_eye_offset_x
 right_eye_offset_y
 ```
 
-They are currently zero placeholders. This feature populates them with the exact render-time values.
+currently contain zero placeholders. This feature replaces them with real render-time offsets.
 
-`FaceAnimator.debug_snapshot()` will expose:
-
-```text
-left_eye_offset
-right_eye_offset
-left_eye_target
-right_eye_target
-reaction_active
-reaction_progress or equivalent deterministic lifecycle data
-```
-
-The trace must record the values used for the actual rendered frame, not pre-clamp or pre-easing targets.
+Trace/invariants/GIF all continue deriving from the same `FaceAnimator.tick()` frames.
 
 ## Verification Scenarios
 
-Extend the deterministic behavior harness rather than building a separate preview path.
+### Existing conversational cycle
 
-### Conversational cycle
+Configured speaking performances should produce nonzero independent offsets.
 
-Existing performance phases begin reporting nonzero independent offsets where configured.
+### New `eye_reaction_cycle`
 
-### Eye-reaction cycle
-
-Add a focused scenario:
+Use phases long enough to see reaction and hold:
 
 ```text
-neutral
-curious
-neutral
-playful
-neutral
-emphatic
-thoughtful
-sympathetic
-uncertain
-neutral
+neutral       0.6 s
+curious       0.8 s
+neutral       0.6 s
+playful       0.8 s
+neutral       0.6 s
+emphatic      0.8 s
+thoughtful    0.8 s
+sympathetic   0.8 s
+uncertain     0.8 s
+neutral       0.6 s
 ```
 
-Each phase must be long enough to show entry, settle, and release behavior in the GIF and trace.
+Use speaking mode for performance phases so the scenario isolates performance behavior from the thinking-mode contribution.
+
+### Thinking mode case
+
+Add a focused deterministic case proving:
+
+```text
+thinking + neutral performance
+=> L target (0,-0.12), R target (0,-0.22)
+```
 
 ### Geometry stress
 
-Existing mood/performance combinations now include independent offsets in final composed geometry checks.
+Existing mood/performance combinations include local eye offsets in final composed panel-bound checks.
 
 ## Hard Invariants
 
-CI fails if any frame violates:
+CI fails if:
 
-1. left/right eye offsets are finite;
-2. each independent eye offset remains in `[-1.5, +1.5]` on both axes;
-3. final composed eye geometry remains within panel safety bounds;
-4. neutral performance target has zero eye-motion target;
-5. zero eye offsets preserve renderer compatibility;
-6. deterministic scenario + seed produces identical traces and frame hashes;
-7. performance release eventually moves toward neutral rather than becoming stuck;
-8. direct cue-to-cue transitions do not require a forced neutral frame;
-9. pupil gaze remains numerically independent from eye translation;
-10. blink state does not reset independent eye offsets.
+1. eye offsets contain NaN/infinity;
+2. any local eye offset leaves `[-1.5,+1.5]` on either axis;
+3. final composed eye geometry leaves panel safety bounds;
+4. neutral performance target contains nonzero performance eye motion;
+5. zero eye offsets change legacy renderer output;
+6. same scenario + seed changes trace or frame hashes;
+7. release does not converge toward the current mode contribution;
+8. direct cue-to-cue transition inserts a forced neutral state;
+9. gaze values change merely because eye translation changes;
+10. blink start/end resets eye offsets;
+11. thinking-mode neutral settled target differs from the specified asymmetric lift;
+12. a reaction exceeds its hard local-offset limits.
 
 ## Informational Metrics
 
-The behavior summary should report, per expression when available:
+Per expression, report when available:
 
 ```text
-left peak X/Y offset
-right peak X/Y offset
-left/right settled X/Y offset
-peak overshoot percentage or distance
+left peak X/Y
+right peak X/Y
+left settled X/Y
+right settled X/Y
+overshoot distance
 entry settle time
 release settle time
-maximum frame-to-frame eye translation
+max frame-to-frame eye translation
 left/right asymmetry magnitude
 ```
 
-These are measured values for review and tuning, not pass/fail thresholds in V1 unless they violate a hard invariant.
+These remain review metrics in V1 rather than arbitrary quality thresholds.
 
-## GIF Labels
+## Mobile GIF
 
-The mobile preview label should include enough information to interpret motion without becoming a dashboard:
+The preview label should include:
 
 ```text
 phase | mode | performance
-L eye: x,y   R eye: x,y
+L x,y | R x,y
 ```
 
-The GIF remains presentation only. Invariants and metrics use every native 30 FPS frame.
+The GIF is presentation only. CI checks every native 30 FPS frame.
 
 ## Error Handling
 
-- Missing `eye_motion`: neutral zeros.
-- Unknown performance cue: existing neutral fallback behavior.
-- Malformed numeric config: safe neutral value for that field.
-- Non-finite computed offset: hard invariant failure in verification; runtime clamps/falls back safely rather than emitting non-finite geometry.
-- Renderer caller omits independent offsets: zero offsets and legacy-equivalent behavior.
+- missing `eye_motion` -> zero performance eye offsets;
+- malformed config -> safe neutral value per field;
+- unknown performance -> existing neutral fallback;
+- non-finite computed runtime value -> replace with safe zero/mode target before rendering and expose a verification failure in deterministic tests;
+- omitted renderer eye offsets -> legacy zero-offset behavior.
 
-## Files Expected to Change During Implementation
+## Expected Files
 
-Likely production files:
+Production:
 
 ```text
 performance.py
@@ -500,12 +510,12 @@ output/animator.py
 output/face.py
 ```
 
-Likely verification/test files:
+Verification/tests:
 
 ```text
 tests/test_performance.py
 tests/test_animator.py
-tests/test_face.py or equivalent renderer test location
+renderer tests (existing location or new focused file)
 tests/test_behavior_verification.py
 tools/behavior_scenarios.py
 tools/render_behavior_preview.py
@@ -515,35 +525,35 @@ No audio, LLM, memory, microphone, camera, or TTS production code should need mo
 
 ## Compatibility Requirements
 
-- Existing callers of `face.render` remain valid through default zero eye offsets.
-- Existing gaze behavior remains unchanged when independent offsets are zero.
-- Existing performance shape/movement config remains valid when `eye_motion` is omitted.
-- Existing 97-test baseline must remain green after updating any tests whose contracts legitimately expand.
-- Remote behavior verification remains lightweight and must not import heavyweight audio/model packages.
+- existing `face.render` callers work unchanged via zero-offset defaults;
+- existing gaze behavior is unchanged at zero eye offsets;
+- old performance config remains valid when `eye_motion` is omitted;
+- the verified 97-test baseline remains green after legitimate contract updates;
+- behavior CI remains lightweight and imports no heavyweight model/audio stack.
 
 ## Acceptance Criteria
 
-The implementation is acceptable when:
+Implementation is accepted when:
 
-1. independent left/right eye translation is visibly present in at least several configured performance cues;
-2. pupil gaze, eye-body translation, and whole-face motion remain distinct layers;
-3. neutral/default rendering remains backward-compatible;
-4. configured/malformed values are safely validated and clamped;
-5. transitions ease and may overshoot without snapping;
-6. direct cue-to-cue transitions are continuous;
-7. blinks do not reset or teleport eye offsets;
-8. CI trace contains real left/right eye-offset values from the rendered frames;
-9. geometry/determinism/behavior invariants pass;
-10. the generated GIF is the real renderer output and is useful for mobile visual review;
-11. subjective tuning remains explicitly separate from hard correctness tests.
+1. several performance cues visibly move the actual eye bodies;
+2. thinking mode produces a small real asymmetric eye-body lift even with neutral performance;
+3. pupil gaze, local eye translation, and whole-face motion remain separate layers;
+4. zero-offset rendering is byte-compatible with current rendering;
+5. config is bounded and malformed values degrade safely;
+6. entry reactions follow the defined overshoot curve without snapping;
+7. releases return smoothly without overshoot;
+8. direct cue-to-cue transitions remain continuous;
+9. blinks do not reset/teleport eye offsets;
+10. CI trace records the actual per-eye offsets used for rendering;
+11. geometry, lifecycle, gaze-independence, and determinism invariants pass;
+12. the real CI-generated GIF can be reviewed from mobile;
+13. subjective motion tuning remains separate from hard correctness checks.
 
-## Deferred Follow-Ups
+## Deferred
 
-After this feature is verified visually, possible later work includes:
+Not part of this feature:
 
-- richer eyelid/partial-squint behavior;
-- per-eye rotation if translation + shape prove insufficient;
-- event-specific micro-reactions beyond performance cues;
-- expressive TTS driven by the same performance state.
-
-Those are not part of this implementation.
+- richer eyelid/partial-squint system;
+- per-eye rotation;
+- event-specific micro-reactions unrelated to performance/mode;
+- expressive TTS mapping.
