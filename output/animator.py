@@ -68,6 +68,20 @@ _THINK_OFFSET = (-1.6, -2.4)
 _BOB_PERIOD = 5.2
 _LEAN_Y_DAMP = 0.55
 
+_EYE_LIMIT = 1.5
+_EYE_REACTION_LEG = 0.12
+_EYE_SETTLE_LEG = 0.16
+_EYE_RELEASE = 0.22
+_EYE_MAX_OVERSHOOT = 0.15
+_EYE_HOLD_TAU = 0.10
+_MODE_EYE_OFFSETS = {
+    "idle": ((0.0, 0.0), (0.0, 0.0)),
+    "tracking": ((0.0, 0.0), (0.0, 0.0)),
+    "listening": ((0.0, 0.0), (0.0, 0.0)),
+    "thinking": ((0.0, -0.12), (0.0, -0.22)),
+    "speaking": ((0.0, 0.0), (0.0, 0.0)),
+}
+
 _MOVEMENT_DEFAULTS: dict[str, float] = {
     "hold": 1.0,
     "spread": 1.0,
@@ -128,6 +142,25 @@ def _neutral_performance_values() -> dict[str, float]:
     return values
 
 
+def _clamp_eye(offset: tuple[float, float]) -> tuple[float, float]:
+    return (
+        _clamp_range(float(offset[0]), -_EYE_LIMIT, _EYE_LIMIT),
+        _clamp_range(float(offset[1]), -_EYE_LIMIT, _EYE_LIMIT),
+    )
+
+
+def _lerp2(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    t: float,
+) -> tuple[float, float]:
+    eased = _smoothstep(t)
+    return (
+        start[0] + (end[0] - start[0]) * eased,
+        start[1] + (end[1] - start[1]) * eased,
+    )
+
+
 class FaceAnimator:
     def __init__(
         self,
@@ -140,6 +173,13 @@ class FaceAnimator:
             "neutral": {
                 "intensity": 0.0,
                 "shape": {key: 0.0 for key in _PERFORMANCE_SHAPE_KEYS},
+                "eye_motion": {
+                    "l_x": 0.0,
+                    "l_y": 0.0,
+                    "r_x": 0.0,
+                    "r_y": 0.0,
+                    "reaction": 0.0,
+                },
                 "movement": dict(_PERFORMANCE_MOVEMENT_DEFAULTS),
             }
         }
@@ -159,6 +199,18 @@ class FaceAnimator:
         self._last_color = tuple(self.current[f"color_{channel}"] for channel in "rgb")
         self._last_render_gaze: tuple[float, float] = (0.0, 0.0)
         self._last_render_offset: tuple[float, float] = (0.0, 0.0)
+
+        self._left_eye_offset: tuple[float, float] = (0.0, 0.0)
+        self._right_eye_offset: tuple[float, float] = (0.0, 0.0)
+        self._left_eye_settled: tuple[float, float] = (0.0, 0.0)
+        self._right_eye_settled: tuple[float, float] = (0.0, 0.0)
+        self._eye_start_left: tuple[float, float] = (0.0, 0.0)
+        self._eye_start_right: tuple[float, float] = (0.0, 0.0)
+        self._eye_overshoot_left: tuple[float, float] = (0.0, 0.0)
+        self._eye_overshoot_right: tuple[float, float] = (0.0, 0.0)
+        self._eye_reaction_phase = "hold"
+        self._eye_reaction_elapsed = 0.0
+        self._eye_expression = "neutral"
 
         self.blink_phase: float = -1.0
         self.next_blink: float = self._rng.uniform(*_BLINK_GAP)
@@ -225,6 +277,11 @@ class FaceAnimator:
             person_pos,
         )
 
+        left_eye_offset, right_eye_offset = self._advance_eye_motion(
+            self._interaction_mode,
+            performance,
+            dt,
+        )
         self._advance_blink(dt)
         gaze = self._advance_gaze(
             dt,
@@ -266,6 +323,7 @@ class FaceAnimator:
             self._openness(),
             gaze,
             offset,
+            eye_offsets=(left_eye_offset, right_eye_offset),
         )
 
     def debug_snapshot(self) -> dict[str, object]:
@@ -281,6 +339,12 @@ class FaceAnimator:
             "speaking_break_remaining": max(self._speak_break_left, 0.0),
             "performance_current": dict(self.performance_current),
             "performance_target": dict(self._performance_target),
+            "left_eye_offset": tuple(self._left_eye_offset),
+            "right_eye_offset": tuple(self._right_eye_offset),
+            "left_eye_settled_target": tuple(self._left_eye_settled),
+            "right_eye_settled_target": tuple(self._right_eye_settled),
+            "reaction_phase": self._eye_reaction_phase,
+            "reaction_elapsed": self._eye_reaction_elapsed,
         }
 
     @staticmethod
@@ -341,6 +405,158 @@ class FaceAnimator:
             target[key] = 1.0 + (configured - 1.0) * intensity
         target["gaze_y_bias"] = float(movement.get("gaze_y_bias", 0.0)) * intensity
         return target
+
+    def _eye_target_data(
+        self,
+        mode: str,
+        cue: PerformanceCue,
+    ) -> tuple[
+        str,
+        float,
+        tuple[float, float],
+        tuple[float, float],
+        float,
+    ]:
+        if cue.expression in self._performances:
+            expression = cue.expression
+            effective_cue = cue
+        else:
+            expression = "neutral"
+            effective_cue = PerformanceCue()
+
+        entry = self._performances.get(expression, {})
+        eye_value = entry.get("eye_motion", {}) if isinstance(entry, dict) else {}
+        eye = eye_value if isinstance(eye_value, dict) else {}
+        intensity = _clamp_range(float(effective_cue.intensity), 0.0, 1.0)
+        mode_left, mode_right = _MODE_EYE_OFFSETS.get(
+            mode,
+            _MODE_EYE_OFFSETS["idle"],
+        )
+        left = _clamp_eye((
+            mode_left[0] + float(eye.get("l_x", 0.0)) * intensity,
+            mode_left[1] + float(eye.get("l_y", 0.0)) * intensity,
+        ))
+        right = _clamp_eye((
+            mode_right[0] + float(eye.get("r_x", 0.0)) * intensity,
+            mode_right[1] + float(eye.get("r_y", 0.0)) * intensity,
+        ))
+        reaction = _clamp_range(float(eye.get("reaction", 0.0)), 0.0, 1.0)
+        return expression, intensity, left, right, reaction
+
+    def _advance_eye_motion(
+        self,
+        mode: str,
+        cue: PerformanceCue,
+        dt: float,
+    ) -> tuple[tuple[float, float], tuple[float, float]]:
+        expression, intensity, settled_left, settled_right, reaction = (
+            self._eye_target_data(mode, cue)
+        )
+        self._left_eye_settled = settled_left
+        self._right_eye_settled = settled_right
+
+        if expression != self._eye_expression:
+            self._eye_expression = expression
+            self._eye_start_left = self._left_eye_offset
+            self._eye_start_right = self._right_eye_offset
+            self._eye_reaction_elapsed = 0.0
+
+            if expression == "neutral":
+                self._eye_reaction_phase = "release"
+            else:
+                self._eye_reaction_phase = "entry"
+                factor = _EYE_MAX_OVERSHOOT * reaction * intensity
+                self._eye_overshoot_left = _clamp_eye((
+                    settled_left[0]
+                    + (settled_left[0] - self._eye_start_left[0]) * factor,
+                    settled_left[1]
+                    + (settled_left[1] - self._eye_start_left[1]) * factor,
+                ))
+                self._eye_overshoot_right = _clamp_eye((
+                    settled_right[0]
+                    + (settled_right[0] - self._eye_start_right[0]) * factor,
+                    settled_right[1]
+                    + (settled_right[1] - self._eye_start_right[1]) * factor,
+                ))
+
+        if self._eye_reaction_phase == "entry":
+            self._eye_reaction_elapsed += dt
+            if self._eye_reaction_elapsed < _EYE_REACTION_LEG:
+                t = self._eye_reaction_elapsed / _EYE_REACTION_LEG
+                self._left_eye_offset = _lerp2(
+                    self._eye_start_left,
+                    self._eye_overshoot_left,
+                    t,
+                )
+                self._right_eye_offset = _lerp2(
+                    self._eye_start_right,
+                    self._eye_overshoot_right,
+                    t,
+                )
+            else:
+                self._eye_reaction_elapsed -= _EYE_REACTION_LEG
+                self._eye_reaction_phase = "settle"
+                self._advance_eye_settle()
+        elif self._eye_reaction_phase == "settle":
+            self._eye_reaction_elapsed += dt
+            self._advance_eye_settle()
+        elif self._eye_reaction_phase == "release":
+            self._eye_reaction_elapsed += dt
+            if self._eye_reaction_elapsed < _EYE_RELEASE:
+                t = self._eye_reaction_elapsed / _EYE_RELEASE
+                self._left_eye_offset = _lerp2(
+                    self._eye_start_left,
+                    settled_left,
+                    t,
+                )
+                self._right_eye_offset = _lerp2(
+                    self._eye_start_right,
+                    settled_right,
+                    t,
+                )
+            else:
+                self._left_eye_offset = settled_left
+                self._right_eye_offset = settled_right
+                self._eye_reaction_phase = "hold"
+                self._eye_reaction_elapsed = 0.0
+        else:
+            alpha = 1.0 - math.exp(-dt / _EYE_HOLD_TAU)
+            self._left_eye_offset = (
+                self._left_eye_offset[0]
+                + (settled_left[0] - self._left_eye_offset[0]) * alpha,
+                self._left_eye_offset[1]
+                + (settled_left[1] - self._left_eye_offset[1]) * alpha,
+            )
+            self._right_eye_offset = (
+                self._right_eye_offset[0]
+                + (settled_right[0] - self._right_eye_offset[0]) * alpha,
+                self._right_eye_offset[1]
+                + (settled_right[1] - self._right_eye_offset[1]) * alpha,
+            )
+
+        self._left_eye_offset = _clamp_eye(self._left_eye_offset)
+        self._right_eye_offset = _clamp_eye(self._right_eye_offset)
+        return self._left_eye_offset, self._right_eye_offset
+
+    def _advance_eye_settle(self) -> None:
+        if self._eye_reaction_elapsed < _EYE_SETTLE_LEG:
+            t = self._eye_reaction_elapsed / _EYE_SETTLE_LEG
+            self._left_eye_offset = _lerp2(
+                self._eye_overshoot_left,
+                self._left_eye_settled,
+                t,
+            )
+            self._right_eye_offset = _lerp2(
+                self._eye_overshoot_right,
+                self._right_eye_settled,
+                t,
+            )
+            return
+
+        self._left_eye_offset = self._left_eye_settled
+        self._right_eye_offset = self._right_eye_settled
+        self._eye_reaction_phase = "hold"
+        self._eye_reaction_elapsed = 0.0
 
     def _advance_blink(self, dt: float) -> None:
         if self.blink_phase >= 0.0:
