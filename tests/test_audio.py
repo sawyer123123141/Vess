@@ -19,6 +19,7 @@ CONFIG = {
     "audio": {
         "wake_variants": ["hey vess"],
         "wake_max_distance": 2,
+        "conversation_timeout_seconds": 30.0,
     }
 }
 
@@ -104,6 +105,41 @@ class AudioLoopTests(unittest.TestCase):
             [event["event"] for event in state.debug_snapshot()["events"]],
             ["transcript", "wake_accepted"],
         )
+
+    def test_wake_opens_conversation_for_followup_without_wake_phrase(self) -> None:
+        dispatched: list[str] = []
+        transcripts = iter(["hey vess how are you", "pretty good"])
+        loop = AudioLoop(
+            CONFIG,
+            State(),
+            RecordingLog(),
+            dispatched.append,
+            transcribe=lambda _: next(transcripts),
+        )
+
+        loop.handle_utterance(np.ones(16_000, dtype=np.float32))
+        loop.handle_utterance(np.ones(16_000, dtype=np.float32))
+
+        self.assertEqual(dispatched, ["how are you", "pretty good"])
+
+    def test_recent_vess_reply_keeps_conversation_open(self) -> None:
+        dispatched: list[str] = []
+        transcripts = iter(["hey vess how are you", "not bad"])
+        state = State()
+        loop = AudioLoop(
+            CONFIG,
+            state,
+            RecordingLog(),
+            dispatched.append,
+            transcribe=lambda _: next(transcripts),
+        )
+
+        loop.handle_utterance(np.ones(16_000, dtype=np.float32))
+        loop._conversation_until = 0.0
+        state.last_spoke = time.time()
+        loop.handle_utterance(np.ones(16_000, dtype=np.float32))
+
+        self.assertEqual(dispatched, ["how are you", "not bad"])
 
     def test_capture_keeps_draining_blocks_while_transcription_runs(self) -> None:
         transcribe_started = threading.Event()
