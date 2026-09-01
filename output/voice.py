@@ -10,6 +10,7 @@ from typing import Any
 
 import numpy as np
 
+from output.tts.base import SynthesisResult, TTSEngine
 from performance import PerformanceCue
 
 
@@ -23,11 +24,13 @@ class VoiceOutput:
         event_log: Any,
         synthesize: Callable[[str], np.ndarray] | None = None,
         play: Callable[[np.ndarray, int], None] | None = None,
+        engine: TTSEngine | None = None,
     ) -> None:
         self._config = config
         self._state = state
         self._event_log = event_log
-        self._synthesize = synthesize
+        self._legacy_synthesize = synthesize
+        self._engine = engine
         self._play = play or _play_audio
 
         self._queue: queue.Queue[
@@ -38,6 +41,7 @@ class VoiceOutput:
                 str,
                 str,
                 np.ndarray,
+                int,
                 int | None,
                 float | None,
                 tuple[float, float] | None,
@@ -54,6 +58,7 @@ class VoiceOutput:
 
         self._acknowledgement = "Yeah?"
         self._acknowledgement_audio: np.ndarray | None = None
+        self._acknowledgement_sample_rate: int | None = None
         self._last_playback_ended_at: float | None = None
         self._last_playback_generation: int | None = None
 
@@ -149,6 +154,7 @@ class VoiceOutput:
                 kind,
                 text,
                 audio,
+                sample_rate,
                 generation_id,
                 synthesis_ms,
                 raw_edge_silence,
@@ -162,6 +168,7 @@ class VoiceOutput:
                 self._state.record_debug("tts_started", text=text)
             self._play_waveform(
                 audio,
+                sample_rate=sample_rate,
                 text=text,
                 synthesis_ms=synthesis_ms,
                 generation_id=generation_id,
@@ -172,7 +179,9 @@ class VoiceOutput:
 
     def _prepare(self, text: str) -> None:
         try:
-            self._acknowledgement_audio = self._synthesize_text(text)
+            result = self._synthesize_text(text, PerformanceCue())
+            self._acknowledgement_audio = result.audio
+            self._acknowledgement_sample_rate = result.sample_rate
             self._state.record_debug("tts_prepared", text=text)
         except Exception as error:
             self._event_log.append("voice_error", {"error": str(error)})
@@ -183,12 +192,18 @@ class VoiceOutput:
             return
 
         synthesis_ms: float | None = None
-        if self._acknowledgement_audio is None:
+        if (
+            self._acknowledgement_audio is None
+            or self._acknowledgement_sample_rate is None
+        ):
             synthesis_started = time.perf_counter()
             self._prepare(self._acknowledgement)
             synthesis_ms = (time.perf_counter() - synthesis_started) * 1000.0
 
-        if self._acknowledgement_audio is None:
+        if (
+            self._acknowledgement_audio is None
+            or self._acknowledgement_sample_rate is None
+        ):
             self._ready_slots.release()
             return
         if self._is_stale(generation_id):
@@ -201,6 +216,7 @@ class VoiceOutput:
                 "acknowledgement",
                 self._acknowledgement,
                 self._acknowledgement_audio,
+                self._acknowledgement_sample_rate,
                 generation_id,
                 synthesis_ms,
                 None,
@@ -222,7 +238,7 @@ class VoiceOutput:
         self._state.record_debug("tts_started", text=text)
         synthesis_started = time.perf_counter()
         try:
-            audio = self._synthesize_text(text)
+            result = self._synthesize_text(text, cue)
         except Exception as error:
             self._ready_slots.release()
             self._event_log.append("voice_error", {"error": str(error), "text": text})
@@ -235,15 +251,16 @@ class VoiceOutput:
             self._record_stale_skip(generation_id, stage="after_synthesis")
             return
 
-        sample_rate = int(self._config.get("voice", {}).get("sample_rate", 24_000))
-        raw_edge_silence = _waveform_edge_silence_ms(audio, sample_rate)
-        audio = _trim_waveform_edges(audio, sample_rate)
+        sample_rate = result.sample_rate
+        raw_edge_silence = _waveform_edge_silence_ms(result.audio, sample_rate)
+        audio = _trim_waveform_edges(result.audio, sample_rate)
 
         self._ready_queue.put(
             (
                 "speak",
                 text,
                 audio,
+                sample_rate,
                 generation_id,
                 synthesis_ms,
                 raw_edge_silence,
@@ -265,6 +282,7 @@ class VoiceOutput:
         self,
         audio: np.ndarray,
         *,
+        sample_rate: int,
         text: str,
         synthesis_ms: float | None = None,
         generation_id: int | None = None,
@@ -281,7 +299,6 @@ class VoiceOutput:
             self._state.speaking = True
         try:
             if audio.size:
-                sample_rate = int(self._config.get("voice", {}).get("sample_rate", 24_000))
                 payload: dict[str, object] = {"text": text}
                 if synthesis_ms is not None:
                     rounded = round(synthesis_ms, 1)
@@ -374,10 +391,19 @@ class VoiceOutput:
             stage=stage,
         )
 
-    def _synthesize_text(self, text: str) -> np.ndarray:
-        if self._synthesize is None:
-            self._synthesize = _make_synthesizer(self._config)
-        return self._synthesize(text)
+    def _synthesize_text(
+        self,
+        text: str,
+        performance: PerformanceCue,
+    ) -> SynthesisResult:
+        if self._engine is not None:
+            return self._engine.synthesize(text, performance)
+
+        if self._legacy_synthesize is None:
+            self._legacy_synthesize = _make_synthesizer(self._config)
+        audio = np.asarray(self._legacy_synthesize(text), dtype=np.float32).reshape(-1)
+        sample_rate = int(self._config.get("voice", {}).get("sample_rate", 24_000))
+        return SynthesisResult(audio, sample_rate)
 
 
 def _waveform_edge_silence_ms(
@@ -434,7 +460,7 @@ def _trim_waveform_edges(
 
 
 def _make_synthesizer(config: dict[str, Any]) -> Callable[[str], np.ndarray]:
-    """Build the CPU Kokoro pipeline only inside the synthesis worker."""
+    """Legacy Kokoro construction retained until the engine factory lands."""
     from kokoro import KPipeline
 
     voice = config.get("voice", {}).get("name", "af_heart")
