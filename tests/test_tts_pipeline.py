@@ -251,6 +251,11 @@ class TtsPipelineTests(unittest.TestCase):
         self.assertEqual(playback_event["raw_trailing_silence_ms"], 480.0)
         self.assertEqual(playback_event["leading_silence_ms"], 100.0)
         self.assertEqual(playback_event["trailing_silence_ms"], 160.0)
+        values = state.debug_snapshot()["values"]
+        self.assertEqual(values["tts_raw_leading_silence_ms"], 330.0)
+        self.assertEqual(values["tts_raw_trailing_silence_ms"], 480.0)
+        self.assertEqual(values["tts_leading_silence_ms"], 100.0)
+        self.assertEqual(values["tts_trailing_silence_ms"], 160.0)
 
     def test_trimming_preserves_quiet_onset_inside_leading_safety_margin(self) -> None:
         played: list[np.ndarray] = []
