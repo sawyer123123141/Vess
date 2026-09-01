@@ -33,6 +33,7 @@ class UtteranceAssembler:
     ) -> None:
         self._sample_rate = sample_rate
         self._threshold = threshold
+        self._pre_roll_floor = threshold * 0.25
         self._min_samples = ceil(sample_rate * min_utterance_seconds)
         self._silence_samples = ceil(sample_rate * silence_seconds)
         self._max_samples = ceil(sample_rate * max_utterance_seconds)
@@ -50,7 +51,7 @@ class UtteranceAssembler:
                 if amplitude < self._threshold:
                     self._pre_roll.append(float(sample))
                     continue
-                self._samples.extend(self._pre_roll)
+                self._samples.extend(self._useful_pre_roll())
                 self._pre_roll.clear()
                 self._samples.append(sample)
                 self._trailing_quiet = 0
@@ -74,6 +75,14 @@ class UtteranceAssembler:
             "vad_active": bool(self._samples),
             "vad_seconds": len(self._samples) / self._sample_rate,
         }
+
+    def _useful_pre_roll(self) -> list[float]:
+        """Keep contiguous pre-trigger audio once it rises above deep silence."""
+        buffered = list(self._pre_roll)
+        for index, sample in enumerate(buffered):
+            if abs(sample) >= self._pre_roll_floor:
+                return buffered[index:]
+        return []
 
     def _finish(self) -> np.ndarray | None:
         final_index = len(self._samples) - self._trailing_quiet
