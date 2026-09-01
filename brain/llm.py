@@ -337,6 +337,26 @@ class ConversationWorker:
                 request=request,
             )
 
+    def cancel_generation(self, expected_generation: int, reason: str) -> bool:
+        """Invalidate exactly the expected latest generation without submitting text."""
+        with self._request_lock:
+            if expected_generation != self._latest_generation:
+                return False
+            self._next_generation += 1
+            replacement_generation = self._next_generation
+            self._latest_generation = replacement_generation
+
+        self._voice.begin_generation(replacement_generation)
+        payload = {
+            "expected_generation": expected_generation,
+            "replacement_generation": replacement_generation,
+            "reason": reason,
+        }
+        self._event_log.append("generation_cancelled", payload)
+        self._state.record_debug("generation_cancelled", **payload)
+        self._state.update_debug(active_generation=replacement_generation)
+        return True
+
     def close(self) -> None:
         if self._thread is None:
             return
