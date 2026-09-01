@@ -21,6 +21,7 @@ from output.voice import VoiceOutput
 from perception.audio import AudioLoop
 from perception import camera as camera_module
 from perception.detector import Detector, run_detection_loop
+from performance import load_performance_definitions
 from state import State
 
 ROOT = Path(__file__).resolve().parent
@@ -39,6 +40,10 @@ FAKE_PERSON_POSITIONS: tuple[tuple[float, float] | None, ...] = (
 
 def _load(name: str) -> dict:
     return json.loads((ROOT / name).read_text(encoding="utf-8"))
+
+
+def _load_performances() -> dict[str, dict[str, object]]:
+    return load_performance_definitions(_load("performance.json"))
 
 
 def _start_perception(config: dict, state: State,
@@ -118,6 +123,7 @@ def _expire_mood(state: State, event_log: object, now: float) -> None:
 def main() -> None:
     config = _load("config.json")
     moods = _load("moods.json")
+    performances = _load_performances()
     mood_names = list(moods)
 
     event_log = EventLog(ROOT / "vess.db")
@@ -136,6 +142,9 @@ def main() -> None:
         voice,
     )
     audio = AudioLoop(config, state, event_log, conversation.submit)
+
+    # Loaded here so malformed human-authored performance config fails fast at startup.
+    _ = performances
 
     stop = threading.Event()
     thread, camera = _start_perception(config, state, stop)
