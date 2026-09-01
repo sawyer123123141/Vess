@@ -1,0 +1,42 @@
+{
+  "neutral": {
+    "intensity": 0.0,
+    "shape": {},
+    "movement": {}
+  },
+  "curious": {
+    "intensity": 0.55,
+    "shape": {"l_h": 1.0, "r_h": 1.4, "r_cy": -0.5},
+    "movement": {"hold_scale": 0.8, "track_bias_scale": 1.1}
+  },
+  "amused": {
+    "intensity": 0.5,
+    "shape": {"l_h": -1.0, "r_h": -0.7, "l_slant": 0.35, "r_slant": 0.25},
+    "movement": {"hold_scale": 1.05, "speaking_break_scale": 1.15}
+  },
+  "playful": {
+    "intensity": 0.65,
+    "shape": {"l_h": -0.5, "r_h": 0.3, "l_slant": 0.7, "r_slant": -0.35, "r_cy": -0.5},
+    "movement": {"hold_scale": 0.75, "ease_scale": 0.85, "speaking_break_scale": 1.4}
+  },
+  "emphatic": {
+    "intensity": 0.7,
+    "shape": {"l_h": 1.2, "r_h": 1.0},
+    "movement": {"hold_scale": 0.8, "track_bias_scale": 1.15, "speaking_break_scale": 0.4}
+  },
+  "thoughtful": {
+    "intensity": 0.55,
+    "shape": {"l_h": -0.5, "r_h": -0.4},
+    "movement": {"hold_scale": 1.4, "ease_scale": 1.2, "gaze_y_bias": -0.22}
+  },
+  "sympathetic": {
+    "intensity": 0.5,
+    "shape": {"l_h": -0.8, "r_h": -0.6, "l_slant": -0.4, "r_slant": -0.3},
+    "movement": {"hold_scale": 1.25, "ease_scale": 1.15, "gaze_y_bias": 0.15, "speaking_break_scale": 0.7}
+  },
+  "uncertain": {
+    "intensity": 0.5,
+    "shape": {"l_slant": 0.3, "r_slant": -0.35, "r_cy": -0.6},
+    "movement": {"hold_scale": 1.15, "gaze_y_bias": -0.05, "speaking_break_scale": 1.3}
+  }
+}
