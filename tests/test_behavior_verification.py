@@ -1,6 +1,8 @@
 """Headless behavior verification harness regressions."""
 
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -28,6 +30,8 @@ from tools.render_behavior_preview import (
     write_preview,
     write_trace,
 )
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class BehaviorVerificationTests(unittest.TestCase):
@@ -206,6 +210,37 @@ class BehaviorVerificationTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("HARNESS ERROR", summary)
         self.assertIn("bad scenario", saved)
+
+    def test_simulation_does_not_import_heavy_runtime_packages(self) -> None:
+        script = r'''
+import builtins
+real_import = builtins.__import__
+blocked = {"kokoro", "faster_whisper", "ultralytics", "sounddevice", "ollama"}
+
+def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+    root = name.split(".", 1)[0]
+    if root in blocked:
+        raise AssertionError(f"blocked heavyweight import: {name}")
+    return real_import(name, globals, locals, fromlist, level)
+
+builtins.__import__ = guarded_import
+from tools.render_behavior_preview import simulate_scenario
+result = simulate_scenario("conversational_cycle", fps=30, seed=1)
+assert len(result.frames) == 360
+'''
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(
+            completed.returncode,
+            0,
+            completed.stdout + completed.stderr,
+        )
 
 
 if __name__ == "__main__":
