@@ -10,11 +10,45 @@ from state import State
 
 
 class LlmTests(unittest.TestCase):
-    def test_split_clauses_emits_completed_punctuation(self) -> None:
+    def test_split_clauses_keeps_short_comma_phrase_together(self) -> None:
         self.assertEqual(
             list(split_clauses(["First, then", " second.", " Last"])),
-            ["First,", "then second.", "Last"],
+            ["First, then second.", "Last"],
         )
+
+    def test_split_clauses_keeps_real_phrase_boundaries_together(self) -> None:
+        self.assertEqual(
+            list(
+                split_clauses(
+                    [
+                        "and blue light is scattered more than other colors because it travels as shorter,",
+                        " smaller waves. It's like a big, natural color show!",
+                    ]
+                )
+            ),
+            [
+                "and blue light is scattered more than other colors because it travels as shorter, smaller waves.",
+                "It's like a big, natural color show!",
+            ],
+        )
+
+    def test_split_clauses_uses_comma_fallback_for_long_streaming_sentence(self) -> None:
+        prefix = "A" * 70
+        middle = "B" * 70
+        chunks = [f"{prefix}, {middle}, and this eventually finishes."]
+
+        self.assertEqual(
+            list(split_clauses(chunks)),
+            [f"{prefix},", f"{middle}, and this eventually finishes."],
+        )
+
+    def test_split_clauses_emergency_splits_punctuation_free_text(self) -> None:
+        words = ["abcdefghij"] * 25
+        clauses = list(split_clauses([" ".join(words)]))
+
+        self.assertGreater(len(clauses), 1)
+        self.assertTrue(all(len(clause) <= 180 for clause in clauses[:-1]))
+        self.assertEqual(" ".join(clauses), " ".join(words))
 
     def test_prompt_puts_grounded_identity_and_history_before_current_request(self) -> None:
         config = {
@@ -104,7 +138,7 @@ class LlmTests(unittest.TestCase):
         worker.submit("Tell me something")
         worker.close()
 
-        self.assertEqual(voice.clauses, ["First,", "then second."])
+        self.assertEqual(voice.clauses, ["First, then second."])
         self.assertEqual(
             [(turn.user, turn.assistant) for turn in state.conversation_turns],
             [("Tell me something", "First, then second.")],
