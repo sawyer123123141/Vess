@@ -121,6 +121,34 @@ class AnimatorTests(unittest.TestCase):
         self.assertEqual(animator._performance_target["l_h"], 0.0)
         self.assertEqual(animator._performance_target["speaking_break_scale"], 1.0)
 
+    def test_debug_snapshot_reports_render_values(self) -> None:
+        state = State(
+            speaking=True,
+            person_present=True,
+            person_pos=(0.8, 0.48),
+            performance=PerformanceCue("playful", 0.65),
+        )
+        animator = FaceAnimator(MOODS, PERFORMANCES, seed=1)
+        animator.tick(state, 1 / 30)
+        snap = animator.debug_snapshot()
+
+        self.assertEqual(snap["interaction_mode"], "speaking")
+        self.assertEqual(snap["render_gaze"], animator._last_render_gaze)
+        self.assertEqual(snap["render_offset"], animator._last_render_offset)
+        self.assertEqual(snap["shape"], animator._last_shape)
+        self.assertEqual(snap["color"], animator._last_color)
+
+    def test_debug_snapshot_copies_mutable_data(self) -> None:
+        animator = FaceAnimator(MOODS, PERFORMANCES, seed=1)
+        animator.tick(State(), 1 / 30)
+        snap = animator.debug_snapshot()
+        snap["shape"]["l_h"] = 999.0
+        snap["performance_current"]["hold_scale"] = 999.0
+        fresh = animator.debug_snapshot()
+
+        self.assertNotEqual(fresh["shape"]["l_h"], 999.0)
+        self.assertNotEqual(fresh["performance_current"]["hold_scale"], 999.0)
+
 
 if __name__ == "__main__":
     unittest.main()
