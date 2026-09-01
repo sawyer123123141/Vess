@@ -133,7 +133,7 @@ class OllamaClient:
 
 
 class ConversationWorker:
-    """Serialize local responses without ever blocking the render loop."""
+    """Serialize responses while keeping only the user's latest pending intent."""
 
     def __init__(
         self,
@@ -150,7 +150,12 @@ class ConversationWorker:
         self._event_log = event_log
         self._client = client
         self._voice = voice
-        self._requests: queue.Queue[str | None] = queue.Queue()
+        self._requests: queue.Queue[tuple[int, str] | None] = queue.Queue(maxsize=1)
+        self._request_lock = threading.Lock()
+        self._next_generation = 0
+        self._latest_generation = 0
+        self._active_request_key: str | None = None
+        self._pending_request_key: str | None = None
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
@@ -164,7 +169,38 @@ class ConversationWorker:
         self._thread.start()
 
     def submit(self, request: str) -> None:
-        self._requests.put(request)
+        key = _request_key(request)
+        with self._request_lock:
+            if key == self._active_request_key or key == self._pending_request_key:
+                self._state.record_debug("duplicate_request", request=request)
+                return
+
+            self._next_generation += 1
+            generation_id = self._next_generation
+            self._latest_generation = generation_id
+
+            replaced_request: str | None = None
+            try:
+                pending = self._requests.get_nowait()
+            except queue.Empty:
+                pending = None
+            if pending is not None:
+                _, replaced_request = pending
+
+            self._pending_request_key = key
+            self._voice.begin_generation(generation_id)
+            self._requests.put_nowait((generation_id, request))
+
+        self._state.update_debug(
+            conversation_queue=self._requests.qsize(),
+            active_generation=generation_id,
+        )
+        if replaced_request is not None:
+            self._state.record_debug(
+                "pending_request_replaced",
+                replaced_request=replaced_request,
+                request=request,
+            )
 
     def close(self) -> None:
         if self._thread is None:
@@ -175,25 +211,48 @@ class ConversationWorker:
 
     def _run(self) -> None:
         while True:
-            request = self._requests.get()
-            if request is None:
+            item = self._requests.get()
+            if item is None:
                 return
-            self._respond(request)
+            generation_id, request = item
+            key = _request_key(request)
+            with self._request_lock:
+                if self._pending_request_key == key:
+                    self._pending_request_key = None
+                self._active_request_key = key
+            self._state.update_debug(conversation_queue=self._requests.qsize())
+            try:
+                self._respond(generation_id, request)
+            finally:
+                with self._request_lock:
+                    if self._active_request_key == key:
+                        self._active_request_key = None
 
-    def _respond(self, user_request: str) -> None:
+    def _respond(self, generation_id: int, user_request: str) -> None:
         if not user_request:
-            self._state.record_debug("acknowledgement")
-            self._voice.enqueue_acknowledgement()
+            if self._is_latest(generation_id):
+                self._state.record_debug("acknowledgement")
+                self._voice.enqueue_acknowledgement(generation_id=generation_id)
             return
 
         with self._state.locked():
             self._state.thinking = True
         llm_started_at = time.perf_counter()
-        self._state.record_debug("llm_started", request=user_request)
+        self._state.record_debug(
+            "llm_started",
+            request=user_request,
+            generation_id=generation_id,
+        )
         try:
             prompt = build_prompt(self._config, self._state, user_request)
             first_clause = True
             for clause in split_clauses(self._client.stream(prompt, self._config)):
+                if not self._is_latest(generation_id):
+                    self._state.record_debug(
+                        "stale_response_cancelled",
+                        generation_id=generation_id,
+                    )
+                    return
                 with self._state.locked():
                     self._state.thinking = False
                 if first_clause:
@@ -204,17 +263,40 @@ class ConversationWorker:
                         "llm_first_clause",
                         clause=clause,
                         latency_ms=rounded,
+                        generation_id=generation_id,
                     )
                     first_clause = False
-                self._voice.enqueue(clause)
-            self._state.record_debug("llm_complete")
-            self._update_mood(user_request)
+                self._voice.enqueue(clause, generation_id=generation_id)
+
+            if not self._is_latest(generation_id):
+                self._state.record_debug(
+                    "stale_response_cancelled",
+                    generation_id=generation_id,
+                )
+                return
+
+            self._state.record_debug("llm_complete", generation_id=generation_id)
+            if self._has_pending_request():
+                self._state.record_debug(
+                    "mood_skipped_pending_request",
+                    generation_id=generation_id,
+                )
+            else:
+                self._update_mood(user_request)
         except Exception as error:
             self._event_log.append("conversation_error", {"error": str(error)})
             self._state.record_debug("conversation_error", error=str(error))
         finally:
             with self._state.locked():
                 self._state.thinking = False
+
+    def _is_latest(self, generation_id: int) -> bool:
+        with self._request_lock:
+            return generation_id == self._latest_generation
+
+    def _has_pending_request(self) -> bool:
+        with self._request_lock:
+            return self._pending_request_key is not None
 
     def _update_mood(self, transcript: str) -> None:
         mood = self._client.classify_mood(transcript, set(self._moods), self._config)
@@ -234,6 +316,14 @@ class ConversationWorker:
         self._state.record_debug(
             "mood_changed", previous_mood=previous_mood, mood=mood
         )
+
+
+def _request_key(value: str) -> str:
+    normalised = "".join(
+        character.lower() if character.isalnum() else " "
+        for character in value
+    )
+    return " ".join(normalised.split()) or "<acknowledgement>"
 
 
 def _clause_end(text: str) -> int | None:
