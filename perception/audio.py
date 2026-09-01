@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from math import ceil
 import queue
 import threading
+import time
 from typing import Any, Callable
 
 import numpy as np
@@ -95,7 +96,7 @@ class UtteranceAssembler:
 
 
 class AudioLoop:
-    """Capture utterances and dispatch only fuzzy wake-phrase requests."""
+    """Capture utterances and dispatch wake phrases or active-conversation followups."""
 
     def __init__(
         self,
@@ -113,8 +114,12 @@ class AudioLoop:
         self._transcribe = transcribe
         self._variants = list(settings.get("wake_variants", ["hey vess"]))
         self._max_distance = int(settings.get("wake_max_distance", 2))
+        self._conversation_timeout = float(
+            settings.get("conversation_timeout_seconds", 30.0)
+        )
+        self._conversation_until = 0.0
         self._blocks: queue.Queue[np.ndarray | None] = queue.Queue(maxsize=16)
-        self._utterances: queue.Queue[np.ndarray | None] = queue.Queue()
+        self._utterances: queue.Queue[tuple[np.ndarray, float] | None] = queue.Queue()
         self._stop = threading.Event()
         self._transcriber_failed = threading.Event()
         self._thread: threading.Thread | None = None
@@ -124,13 +129,19 @@ class AudioLoop:
             int(settings.get("sample_rate", 16_000)),
             float(settings.get("vad_threshold", 0.015)),
             float(settings.get("min_utterance_seconds", 0.25)),
-            float(settings.get("silence_seconds", 0.8)),
+            float(settings.get("silence_seconds", 0.45)),
             float(settings.get("max_utterance_seconds", 15.0)),
             float(settings.get("pre_roll_seconds", 0.25)),
         )
 
-    def handle_utterance(self, samples: np.ndarray) -> None:
-        """Transcribe one utterance and either log rejection or dispatch it."""
+    def handle_utterance(
+        self,
+        samples: np.ndarray,
+        *,
+        speech_ended_at: float | None = None,
+    ) -> None:
+        """Transcribe one utterance and dispatch it if the conversation gate allows."""
+        transcription_started = time.perf_counter()
         try:
             if self._transcribe is None:
                 raise RuntimeError("audio loop was not started")
@@ -140,21 +151,44 @@ class AudioLoop:
             self._state.record_debug("audio_error", error=str(error))
             return
 
+        transcription_finished = time.perf_counter()
+        if speech_ended_at is not None:
+            transcription_ms = (transcription_finished - transcription_started) * 1000.0
+            speech_to_transcript_ms = (transcription_finished - speech_ended_at) * 1000.0
+            self._state.update_debug(
+                transcription_ms=round(transcription_ms, 1),
+                speech_to_transcript_ms=round(speech_to_transcript_ms, 1),
+            )
+
         self._state.record_debug("transcript", transcript=transcript)
+        if not transcript:
+            self._event_log.append("wake_rejected", {"transcript": "", "reason": "empty"})
+            self._state.record_debug("wake_rejected", transcript="", reason="empty")
+            return
+
         closest = match_wake_phrase(transcript, self._variants, 1_000_000)
         accepted = (
             closest if closest is not None and closest.distance <= self._max_distance else None
         )
         payload = _wake_payload(transcript, closest)
-        if accepted is None:
-            self._event_log.append("wake_rejected", payload)
-            self._state.record_debug("wake_rejected", **payload)
+        if accepted is not None:
+            self._open_conversation()
+            self._event_log.append("wake_accepted", payload)
+            self._state.record_debug("wake_accepted", **payload)
+            request = " ".join(transcript.split()[accepted.consumed_words:])
+            self._on_request(request)
             return
 
-        self._event_log.append("wake_accepted", payload)
-        self._state.record_debug("wake_accepted", **payload)
-        request = " ".join(transcript.split()[accepted.consumed_words:])
-        self._on_request(request)
+        if self._conversation_is_active():
+            self._open_conversation()
+            followup_payload = {"transcript": transcript}
+            self._event_log.append("followup_accepted", followup_payload)
+            self._state.record_debug("followup_accepted", **followup_payload)
+            self._on_request(transcript)
+            return
+
+        self._event_log.append("wake_rejected", payload)
+        self._state.record_debug("wake_rejected", **payload)
 
     def start(self) -> None:
         """Open the microphone and begin processing queued audio blocks."""
@@ -241,7 +275,7 @@ class AudioLoop:
                             "audio_dropped", reason="transcriber_unavailable"
                         )
                     else:
-                        self._utterances.put(utterance)
+                        self._utterances.put((utterance, time.perf_counter()))
         finally:
             with self._state.locked():
                 self._state.listening = False
@@ -268,11 +302,31 @@ class AudioLoop:
                 return
 
         while True:
-            utterance = self._utterances.get()
-            if utterance is None:
+            item = self._utterances.get()
+            if item is None:
                 return
+            utterance, speech_ended_at = item
             self._state.update_debug(transcription_queue=self._utterances.qsize())
-            self.handle_utterance(utterance)
+            self.handle_utterance(utterance, speech_ended_at=speech_ended_at)
+
+    def _open_conversation(self) -> None:
+        if self._conversation_timeout <= 0.0:
+            return
+        self._conversation_until = time.time() + self._conversation_timeout
+        self._state.update_debug(conversation_active=True)
+
+    def _conversation_is_active(self) -> bool:
+        if self._conversation_timeout <= 0.0:
+            return False
+        with self._state.locked():
+            last_spoke = float(self._state.last_spoke)
+        deadline = max(
+            self._conversation_until,
+            last_spoke + self._conversation_timeout,
+        )
+        active = time.time() <= deadline
+        self._state.update_debug(conversation_active=active)
+        return active
 
 
 def match_wake_phrase(
@@ -354,7 +408,14 @@ def _make_transcriber(config: dict[str, Any]) -> Callable[[np.ndarray], str]:
     )
 
     def transcribe(samples: np.ndarray) -> str:
-        segments, _ = model.transcribe(samples)
+        segments, _ = model.transcribe(
+            samples,
+            language=settings.get("language", "en"),
+            beam_size=int(settings.get("beam_size", 1)),
+            condition_on_previous_text=bool(
+                settings.get("condition_on_previous_text", False)
+            ),
+        )
         return " ".join(segment.text.strip() for segment in segments).strip()
 
     return transcribe
