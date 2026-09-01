@@ -4,59 +4,35 @@
 
 Make ordinary Vess development verifiable without requiring the owner to be physically at the target PC for every iteration.
 
-The verification system should automatically run deterministic behavior simulations using the real runtime face stack, produce machine-checkable numeric traces, generate a human-viewable animation, and summarize the results in GitHub Actions so changes can be reviewed from mobile.
+The system must automatically produce three forms of evidence from the **same deterministic behavior run**:
 
-This system does **not** replace final target-PC acceptance for microphone, camera, speakers, local model latency, or subjective visual quality. It reduces how often that manual acceptance is required.
+1. machine-checkable behavioral results;
+2. a frame-by-frame numeric trace;
+3. a human-viewable animation.
 
-## Why this is a separate subsystem
+It reduces dependence on manual PC testing but does not replace final target-machine acceptance for microphone, camera, speakers, model latency, GPU/CPU contention, or subjective visual quality.
 
-Vess currently has unit tests for behavior and can be previewed live through its web output, but there is no single repeatable path that answers all three questions:
+## Architecture
 
-1. Did the implementation violate any known behavioral rule?
-2. What exactly did the face do numerically over time?
-3. What did that same run actually look like?
-
-A GIF alone answers only the third question. Unit tests alone answer only selected rules. A useful remote verification path must generate all three forms of evidence from the **same deterministic simulation**.
-
-The verification subsystem therefore owns scripted scenarios, trace capture, invariant checking, preview rendering, human-readable summaries, and CI publication. It must not own or duplicate face behavior itself.
-
-## Core principle
-
-The verification harness must exercise the **real production state and animation code**.
-
-The path is:
+The verification harness exercises production code directly:
 
 ```text
 BehaviorScenario
     -> real State
     -> real FaceAnimator.tick(...)
     -> real face.render(...)
-    -> rendered frame
-    -> trace record from the same tick
-    -> invariant checks
-    -> GIF + JSON trace + text summary
+    -> exact rendered frame
+    -> animator diagnostic snapshot from that same tick
+    -> trace record
+    -> invariants + metrics
+    -> preview.gif + trace.json + summary.txt
 ```
 
-Do not create a second simplified animator for testing. Do not manually redraw Vess in the preview tool. If the production face changes, the remote preview should change automatically because it imports the production modules.
+Do not build a second animator, manually redraw Vess in Pillow, or reimplement gaze/eye math inside the harness. The preview must change automatically when production animation changes.
 
 ## Scope
 
-This first verification slice covers:
-
-- deterministic scripted face/runtime scenarios;
-- full frame-by-frame numeric trace capture;
-- automatic behavioral invariant checks;
-- a GIF preview built from the exact frames returned by `FaceAnimator.tick`;
-- a readable summary suitable for GitHub Actions output;
-- GitHub Actions execution on pushes and pull requests;
-- downloadable CI artifacts containing the preview and raw trace;
-- ordinary Python unit-test execution in the same workflow.
-
-It is intentionally small. It does not build a permanent analytics website, remote-control the target PC, exercise real hardware, or attempt computer-vision scoring of whether an expression is aesthetically good.
-
-## Files and responsibilities
-
-The implementation should prefer focused files:
+This slice adds:
 
 ```text
 tools/
@@ -66,11 +42,13 @@ tools/
 .github/workflows/
   verify.yml
 
+requirements-ci.txt
+
 tests/
   test_behavior_verification.py
 ```
 
-Generated files are build artifacts, not committed source:
+Generated output is not committed:
 
 ```text
 artifacts/behavior-verification/
@@ -79,23 +57,67 @@ artifacts/behavior-verification/
   summary.txt
 ```
 
-`behavior_scenarios.py` defines deterministic input timelines only.
+Out of scope:
 
-`render_behavior_preview.py` owns simulation execution, trace collection, invariant evaluation, artifact generation, and command-line exit status.
+- remote desktop/control of the target PC;
+- real camera/microphone/audio testing in CI;
+- Ollama, Whisper, Kokoro, or YOLO inference in CI;
+- automatic aesthetic scoring;
+- GitHub Pages or a permanent dashboard;
+- historical analytics storage;
+- automatic merge based on verification scores;
+- implementing independent whole-eye motion itself.
 
-The existing `State`, `FaceAnimator`, `face.py`, `moods.json`, and `performance.json` remain production-owned and are imported rather than copied.
+## Responsibilities
 
-## Deterministic simulation clock
+### `tools/behavior_scenarios.py`
 
-The verification runner must not depend on real wall-clock pacing.
+Defines deterministic synthetic timelines only. It contains no renderer logic and no invariant logic.
 
-Use a fixed simulated frame rate of **30 FPS**, matching the production render target. Each step advances by:
+### `tools/render_behavior_preview.py`
+
+Owns:
+
+- scenario execution;
+- deterministic frame stepping;
+- trace collection;
+- invariant checks;
+- metric calculations;
+- GIF creation from real animator frames;
+- `trace.json` and `summary.txt` output;
+- CLI exit status.
+
+### `FaceAnimator`
+
+Remains the owner of animation physics. If the harness needs internal numeric values that are not safely exposed, add one non-mutating animator-local diagnostic method:
 
 ```python
-dt = 1.0 / 30.0
+def debug_snapshot(self) -> dict[str, object]:
+    ...
 ```
 
-A scenario is a sequence of timed state directives. Example:
+The snapshot reports values the animator already computed. It must not reconstruct animation behavior, mutate shared `State`, or become a control API.
+
+## Deterministic simulation
+
+Use the production target rate:
+
+```python
+FPS = 30
+dt = 1.0 / FPS
+```
+
+No `sleep()` is used. Scenario duration is converted to deterministic integer frame counts.
+
+Construct `FaceAnimator` with RNG seed `1` by default. A scenario may explicitly declare a different seed only for a named regression case.
+
+Set scripted `State.mood_until = 0.0` unless testing expiry elsewhere so production `time.time()` mood-expiry behavior cannot make the run nondeterministic.
+
+The runner never monkeypatches animation physics merely to make a test stable.
+
+## Scenario model
+
+A phase contains:
 
 ```python
 ScenarioPhase(
@@ -106,29 +128,15 @@ ScenarioPhase(
         "thinking": True,
         "speaking": False,
         "person_present": True,
-        "person_pos": (0.78, 0.46),
+        "person_pos": (0.80, 0.48),
         "performance": PerformanceCue("thoughtful", 0.55),
     },
 )
 ```
 
-The runner converts each duration into a deterministic integer frame count. No `sleep()` is used.
+Applying a phase changes only fields declared by that phase. The runner starts each scenario from a fresh `State` and fresh `FaceAnimator`.
 
-The animator is constructed with a fixed RNG seed for verification. The initial seed should be **1** unless a scenario explicitly declares another seed for a specific regression case.
-
-### Wall-clock dependency
-
-The production animator currently may inspect real time for mood expiry. The verification runner must avoid nondeterminism from that path by setting `mood_until = 0.0` for scripted scenarios unless the test specifically targets expiry elsewhere.
-
-Do not monkeypatch production animation physics merely to make tests deterministic.
-
-## Scenario model
-
-Start with a small fixed scenario set that exercises the conversational behavior already present and leaves room for whole-eye movement later.
-
-### Scenario 1: conversational cycle
-
-Timeline:
+### Scenario 1: `conversational_cycle`
 
 ```text
 idle                 1.0 s
@@ -141,33 +149,27 @@ speaking emphatic     2.0 s
 idle                  1.0 s
 ```
 
-Use one stable person position, initially `(0.80, 0.48)`, so state transitions are easy to compare.
+Use person position `(0.80, 0.48)` throughout the conversational portion. This produces the primary mobile GIF.
 
-This scenario produces the primary mobile preview.
+### Scenario 2: `priority_conflicts`
 
-### Scenario 2: priority conflicts
-
-Deliberately enable overlapping flags to verify:
+Exercise overlapping flags and verify:
 
 ```text
 listening > thinking > speaking > tracking > idle
 ```
 
-This scenario may be trace/test only and does not need its own GIF initially.
+This may be trace-only.
 
-### Scenario 3: geometry stress
+### Scenario 3: `geometry_stress`
 
-Cycle all configured moods and performance expressions through deterministic frames while varying person position across safe normalized extremes.
+Cycle every configured mood and performance expression while moving the synthetic person through several normalized positions near the useful tracking range.
 
-Its purpose is to prove numeric validity and geometry bounds, not visual storytelling.
-
-### Future scenario compatibility
-
-The schema must support future fields for independent whole-eye motion without redesigning the harness. Trace fields for left/right eye translation should exist from the first version and remain `0.0` until production animation exposes nonzero values.
+Purpose: numeric validity and geometry safety, not storytelling.
 
 ## Trace schema
 
-`trace.json` is the authoritative machine-readable record of the simulated run.
+`trace.json` is authoritative machine-readable evidence.
 
 Top level:
 
@@ -199,7 +201,7 @@ Each frame contains at least:
   "speaking": false,
 
   "person_present": true,
-  "person_x": 0.8,
+  "person_x": 0.80,
   "person_y": 0.48,
 
   "gaze_x": 0.0,
@@ -218,118 +220,104 @@ Each frame contains at least:
   "right_eye_offset_x": 0.0,
   "right_eye_offset_y": 0.0,
 
+  "left_eye_width": 16.0,
   "left_eye_height": 22.0,
+  "right_eye_width": 12.0,
   "right_eye_height": 16.0,
   "left_eye_slant": 0.0,
   "right_eye_slant": 0.0
 }
 ```
 
-The exact numeric eye positions/heights come from the animator's composed render parameters for that frame, not from re-reading static eye-shape definitions after the fact.
+Eye coordinates and sizes come from the animator's final composed render parameters for that frame. They are not reconstructed from `moods.json` afterward.
 
-### Exposing animator diagnostics
+The independent left/right eye offset fields exist from schema version 1. They remain zero until production whole-eye translation exists, which lets that future feature plug into verification without another trace redesign.
 
-The runner may read animator-owned diagnostic/test attributes such as `_interaction_mode`, `_gaze`, `face_offset`, `_last_shape`, `_last_color`, and performance overlay state when those already exist.
+## Hard invariants vs metrics
 
-If a needed value is not currently exposed, prefer adding a single non-mutating snapshot method to `FaceAnimator` rather than having the verification tool reconstruct internal physics.
-
-Recommended future-safe interface:
-
-```python
-def debug_snapshot(self) -> dict[str, object]:
-    ...
-```
-
-This is animator-local diagnostic state only. It is not shared runtime `State`, persistence, or a production control interface.
-
-## Behavioral invariants
-
-The runner must distinguish **hard invariants** from **informational metrics**.
-
-A hard invariant failure exits nonzero and fails CI. Informational metrics appear in the summary but do not fail the build.
+Hard invariant failures fail CI. Informational metrics never fail CI in the first version.
 
 ### Global hard invariants
 
 Every frame must satisfy:
 
-- all traced numeric values are finite;
+- every traced numeric value is finite;
 - no NaN or infinity;
-- rendered frame shape is exactly `64 x 64 x 3`;
+- rendered frame shape is exactly `(64, 64, 3)`;
 - rendered frame dtype is `uint8`;
-- gaze remains inside `[-1.0, 1.0]` on each axis;
-- eye heights remain above the renderer's usable minimum;
-- eye geometry stays inside defined safe panel bounds;
-- performance intensity remains in `[0.0, 1.0]`;
-- repeated runs with the same scenario/seed produce identical trace values within a strict numeric tolerance and identical rendered frames.
+- gaze X/Y stay in `[-1.0, 1.0]`;
+- performance intensity stays in `[0.0, 1.0]`;
+- eye dimensions remain usable;
+- composed eye geometry plus whole-face offset remains inside an explicit panel safety boundary;
+- the same scenario + seed produces the same trace within strict floating-point tolerance and identical native rendered frames.
 
-The geometry bounds should be calculated from composed eye centers, widths/heights, slants, and whole-face offsets with a small explicit safety margin. Do not assert only static parameter ranges while ignoring where the eye actually lands on the panel.
+Geometry validation must use the **composed** eye centers, dimensions, slants, and offsets. Merely checking static JSON ranges is insufficient.
 
-### Listening hard invariants
+### Listening invariants
 
-During stable listening frames after a short transition allowance:
+After a short transition allowance:
 
-- `interaction_mode == "listening"`;
-- idle fixation does not change;
-- if a person exists, gaze is directionally closer to the person's gaze target than to unrelated idle fixations;
-- the whole-face offset leans toward the person's horizontal direction rather than away from it.
+- mode is `listening`;
+- idle fixation does not mutate;
+- with a person present, gaze is directionally toward the person's target rather than an unrelated idle target;
+- whole-face horizontal offset leans toward the person's horizontal direction.
 
-Do not require an exact gaze coordinate. The animator intentionally eases and drifts.
+Do not assert one exact gaze coordinate.
 
-### Thinking hard invariants
+### Thinking invariants
 
-During stable thinking frames:
+After transition:
 
-- `interaction_mode == "thinking"`;
-- gaze has a negative vertical component, meaning upward in Vess gaze coordinates;
-- thinking does not use direct person tracking even when a person remains present;
+- mode is `thinking`;
+- gaze Y is negative, meaning upward in Vess coordinates;
+- direct person tracking is not used even though the person may remain present;
 - idle fixation does not mutate.
 
-### Speaking hard invariants
+### Speaking invariants
 
-During stable speaking frames:
+After transition:
 
-- `interaction_mode == "speaking"`;
-- when a person exists, most non-break frames look generally toward that person;
-- gaze breaks, when they occur, stay within configured duration bounds;
-- no waveform or audio input is required to produce speaking eye behavior.
+- mode is `speaking`;
+- with a person present, most non-break frames are generally person-directed;
+- every observed speaking gaze break stays within the production duration bounds;
+- speaking behavior requires no waveform or audio input.
 
-Do **not** require at least one gaze break in every short scenario because deterministic RNG may legitimately produce none in a small window. Instead record break count and validate every observed break.
+Do **not** require at least one gaze break in every short run. A fixed RNG seed can legitimately produce none in a small interval.
 
-### Performance hard invariants
+### Performance invariants
 
-For every configured performance expression:
+Across configured expressions:
 
-- composed values remain finite and inside geometry bounds;
-- neutral leaves zero transient shape deltas and unit movement scales;
-- mood color is not modified by performance;
-- unknown performance names degrade to neutral behavior.
+- final values remain finite and inside geometry bounds;
+- neutral produces zero shape deltas and unit movement scales;
+- performance does not alter mood color;
+- an unknown performance expression degrades to neutral.
 
-### Informational metrics
+## Informational metrics
 
-Examples:
+Calculate and report useful measurements such as:
 
-- time for gaze to move 90% of the distance toward a new interaction target;
-- peak face-offset magnitude;
+- gaze 90%-settle time after an interaction-mode change;
+- peak whole-face offset;
 - percentage of speaking frames generally directed toward the person;
-- speaking gaze-break count;
-- average and maximum gaze-break duration;
-- maximum left/right eye shape delta per performance expression;
-- maximum asymmetry introduced by playful/uncertain expressions;
+- gaze-break count;
+- average/max gaze-break duration;
 - maximum frame-to-frame gaze delta;
-- maximum frame-to-frame whole-face offset delta.
+- maximum frame-to-frame whole-face delta;
+- maximum left/right eye shape delta by performance;
+- maximum playful/uncertain asymmetry.
 
-These are useful for review and regression comparison but should not initially fail CI unless a later bug proves a particular threshold must become contractual.
+These are review evidence, not pass/fail thresholds initially. A metric becomes contractual only after a real regression establishes a justified bound.
 
-## Human-readable summary
+## Summary output
 
-`summary.txt` should be concise enough to read directly in GitHub Actions.
+`summary.txt` must be generated entirely from run results.
 
-Example shape:
+Example format only:
 
 ```text
 Vess behavior verification
 
-Unit tests: PASS
 Scenarios: 3/3 PASS
 Invalid frames: 0
 Geometry: PASS
@@ -346,64 +334,54 @@ Conversational cycle
 Performance
   playful max L/R eye delta: 0.33 / 0.46 px
   emphatic max L/R eye-height delta: 0.84 / 0.70 px
-
-Artifacts
-  preview.gif
-  trace.json
 ```
 
-All values in the summary must be calculated from the generated trace. Never hard-code example metrics.
+The numbers above are examples, never constants.
 
-If any hard invariant fails, the summary must name the scenario, frame/time range, invariant, and relevant measured values.
-
-## Visual preview
-
-Generate `preview.gif` from the exact `np.ndarray` frames returned by `FaceAnimator.tick` during the primary conversational-cycle scenario.
-
-Do not recreate eye geometry in Pillow or another renderer.
-
-The GIF may scale each 64×64 frame using nearest-neighbor for phone readability. Scaling is presentation-only; trace and invariant checks use native 64×64 frames.
-
-The preview may include a narrow label area outside the original frame containing:
+On failure, identify scenario, phase/frame/time, invariant, and observed values. Example:
 
 ```text
-phase
-interaction mode
-performance expression
+FAIL conversational_cycle frame 143 (4.767 s)
+Invariant: gaze_y must remain within [-1, 1]
+Observed: -1.083
+Mode: thinking
+Performance: thoughtful
 ```
 
-Do not draw labels over the actual 64×64 Vess panel content.
+## GIF preview
 
-Keep GIF generation bounded. The first scenario is about 12 seconds at 30 FPS; the GIF may export fewer display frames, such as every second or third simulation frame, as long as the underlying trace/invariant run still executes all 30 FPS frames.
+`preview.gif` is built from the exact NumPy frames returned by production `FaceAnimator.tick`.
 
-## Test strategy
+Do not redraw the eyes with Pillow. Pillow is only the encoder/presentation layer.
 
-### Unit tests for the verification harness
+Native simulation remains 30 FPS and 64×64. For mobile readability, GIF output may:
 
-`tests/test_behavior_verification.py` should cover:
+- nearest-neighbor upscale the native frame;
+- add a label strip outside the 64×64 content;
+- include phase, mode, and performance name;
+- export every second or third simulation frame to reduce artifact size.
 
-- scenario durations convert to the expected deterministic frame counts;
-- applying a phase mutates only declared `State` fields;
-- generated traces use monotonically increasing frame/time values;
-- trace values are JSON serializable and finite;
-- the same scenario and seed produce identical trace/frame hashes;
-- a deliberately invalid synthetic trace triggers the correct invariant failure;
-- summary metrics are calculated from trace data rather than hard-coded;
-- preview generation receives frames produced by the real animator path.
+All trace/invariant processing still uses every simulated 30 FPS frame.
 
-### Existing production tests
+## Verification harness tests
 
-The GitHub workflow also runs:
+`tests/test_behavior_verification.py` covers:
 
-```powershell
-python -m unittest discover -s tests -v
-```
+- phase durations convert to expected frame counts;
+- phase application changes only declared `State` fields;
+- frame/time values are monotonic;
+- all trace records are JSON serializable;
+- repeated scenario + seed produces equal trace/frame hashes;
+- a deliberately invalid synthetic trace produces the correct invariant failure;
+- summary numbers are calculated from supplied trace records;
+- preview encoding receives frames produced by the real animator path;
+- no scenario imports or starts Ollama, Whisper, Kokoro, YOLO, microphone, or audio playback.
 
-The behavior runner then executes only if the unit suite passes, so a broken production test does not generate misleading green preview artifacts.
+Avoid committed golden GIFs/pixel snapshots. Intentional animation tuning should not require updating binary expected files.
 
-## CLI contract
+## CLI
 
-The runner should support a simple command from the repository root:
+From repo root:
 
 ```powershell
 python tools/render_behavior_preview.py
@@ -418,9 +396,7 @@ fps = 30
 output = artifacts/behavior-verification
 ```
 
-The initial implementation does not need a large CLI framework. `argparse` is enough.
-
-Useful optional arguments:
+Optional arguments:
 
 ```text
 --scenario <name>
@@ -429,60 +405,88 @@ Useful optional arguments:
 --no-gif
 ```
 
-Do not expose tuning controls for production animator physics through this CLI. Those belong in production config, not in a test harness.
+Use standard-library `argparse`; no CLI framework.
 
-Exit status:
+Exit codes:
 
 ```text
-0 = all hard invariants passed
-1 = one or more hard invariants failed
-2 = harness/configuration error
+0  all hard invariants passed
+1  one or more hard invariants failed
+2  harness/configuration error
 ```
+
+Do not expose animator tuning parameters through this CLI.
+
+## CI dependency strategy
+
+The repository's normal `requirements.txt` includes heavy runtime packages such as `ultralytics`, `faster-whisper`, `sounddevice`, and `kokoro`. Those are unnecessary for synthetic face verification and should not be installed just to create a 64×64 preview.
+
+Add `requirements-ci.txt` with the lightweight dependencies needed by the repository tests and preview harness:
+
+```text
+numpy
+opencv-python-headless
+fastapi
+uvicorn
+httpx
+pillow
+```
+
+This works with the current import structure because heavyweight libraries are imported lazily in their runtime paths. If implementation reveals a current unit test genuinely requires another lightweight package to import, add that exact package to `requirements-ci.txt`; do not fall back to installing the entire runtime requirements file unless a test actually exercises that runtime package.
+
+The behavior-preview code itself must import only:
+
+- production `State`;
+- production `FaceAnimator` / `face.py`;
+- `moods.json` / `performance.json`;
+- NumPy;
+- Pillow for GIF encoding;
+- Python standard library.
 
 ## GitHub Actions
 
-Add one workflow, `.github/workflows/verify.yml`.
-
-Trigger on:
+Add `.github/workflows/verify.yml` triggered by:
 
 ```yaml
 push:
 pull_request:
 ```
 
-The initial workflow should target a mainstream supported Python version compatible with Vess. If the repository declares an exact Python version elsewhere, use that value; otherwise prefer Python 3.11 for CI portability rather than pretending CI reproduces the owner's full Windows runtime.
+Use Python 3.11 unless the repository later declares a different exact supported version.
 
-Jobs can remain one job initially:
+Use **two jobs** so the lightweight visual harness remains conceptually separate from broad repository tests.
+
+### Job 1: `unit-tests`
 
 ```text
 checkout
-setup Python
-install test/preview dependencies
-run unittest suite
-run behavior verification
-write summary to GitHub step summary
-upload behavior-verification artifacts
+setup Python 3.11
+install requirements-ci.txt
+run python -m unittest discover -s tests -v
 ```
 
-### Dependency scope
+This job proves existing code still passes its ordinary test suite without booting external models/services.
 
-Do not install heavyweight runtime dependencies that the verification path does not need.
+### Job 2: `behavior-preview`
 
-The face/animator path needs NumPy and image/GIF support. If importing `main.py` or hardware/model packages would drag in Whisper, Kokoro, OpenCV camera backends, Ollama, or sounddevice, the verification harness must avoid those imports.
+Depends on `unit-tests` succeeding.
 
-Use production `State`, `FaceAnimator`, `face.py`, JSON config, and lightweight dependencies only.
+```text
+checkout
+setup Python 3.11
+install numpy + pillow (requirements-ci.txt is acceptable if simpler)
+run python tools/render_behavior_preview.py
+append summary.txt to $GITHUB_STEP_SUMMARY
+upload artifacts/behavior-verification
+```
 
-If Pillow is not already a project dependency, it may be added as a test/verification-only dependency for GIF encoding. Do not add a large graphics framework.
-
-## GitHub artifact publication
-
-Always upload the verification output directory as an Actions artifact named:
+Artifact name:
 
 ```text
 vess-behavior-verification
 ```
 
-The artifact contains at minimum:
+Artifact contents:
 
 ```text
 preview.gif
@@ -490,39 +494,25 @@ trace.json
 summary.txt
 ```
 
-The GitHub Actions job summary should contain the full readable `summary.txt` text and clearly identify whether artifacts were produced.
+Do not add GitHub Pages or external hosting in version 1.
 
-Do not require GitHub Pages, a deployed website, or any external hosting in the first version.
-
-## Mobile review workflow
-
-The intended remote workflow is:
+## Mobile workflow
 
 ```text
-code change pushed
-    -> GitHub Actions runs automatically
-    -> unit tests + behavior verification execute
-    -> job summary gives PASS/FAIL + measured metrics
-    -> preview/trace are downloadable artifacts
-    -> implementation can be reviewed from mobile
+code pushed
+   -> unit-tests job
+   -> behavior-preview job
+   -> Actions summary shows pass/fail + measured values
+   -> GIF + JSON + summary downloadable from phone
 ```
 
-This provides enough evidence for ordinary iteration while the owner is away from the target PC.
+This is sufficient for normal development iteration while away from the PC.
 
-Final target-machine acceptance still remains necessary when a change touches:
+## Future whole-eye movement
 
-- microphone input;
-- real camera/detector behavior;
-- physical display hardware;
-- speakers/audio device behavior;
-- Whisper or local model performance;
-- Kokoro latency or audible quality;
-- CPU/GPU contention;
-- subjective animation quality before merge of a significant visual change.
+Verification is deliberately designed before independent whole-eye translation is implemented.
 
-## Relationship to future whole-eye movement
-
-The trace schema deliberately distinguishes:
+The trace distinguishes:
 
 ```text
 whole-face offset
@@ -531,119 +521,46 @@ right-eye offset
 pupil/gaze direction
 ```
 
-At first, left/right independent eye offsets may remain zero or map directly from composed eye centers because production Vess does not yet have an explicit independent-eye translation layer.
+When production whole-eye movement arrives, the existing schema begins reporting nonzero per-eye offsets.
 
-When independent whole-eye movement is implemented later, it plugs into the existing trace without changing the verification architecture.
+Then add invariants for:
 
-New invariants can then check:
-
-- per-eye translation bounds;
+- independent eye translation bounds;
 - left/right asymmetry limits;
-- reaction motion duration;
-- return-to-baseline behavior;
-- no collision/overlap or edge clipping;
-- intentional difference between pupil attention and whole-eye expression motion.
+- reaction duration;
+- return to baseline;
+- no edge clipping or destructive overlap;
+- meaningful distinction between pupil attention motion and whole-eye expressive motion.
 
-This is preferable to designing a preview around today's pupil-only behavior and rebuilding it immediately afterward.
+No verification architecture rewrite should be needed.
 
-## Failure reporting
+## Security/privacy
 
-A failed CI run must make the problem actionable.
+CI uses synthetic state only.
 
-Bad:
+Never upload:
 
-```text
-behavior verification failed
-```
-
-Required style:
-
-```text
-FAIL conversational_cycle frame 143 (4.767 s)
-Invariant: gaze_y must remain within [-1, 1]
-Observed: -1.083
-Mode: thinking
-Performance: thoughtful
-```
-
-For range or aggregate failures, report the relevant interval and metric:
-
-```text
-FAIL conversational_cycle speaking phase
-Invariant: observed gaze break exceeded 0.60 s maximum
-Observed: 0.73 s from 7.133 s to 7.867 s
-```
-
-## Avoiding brittle tests
-
-Do not assert exact frame pixels or exact gaze coordinates for ordinary behavior.
-
-Exact-output snapshots are allowed only for determinism checks comparing the runner to itself at the same code revision/seed. They should not become committed golden images that must be manually updated whenever an intentional animation change occurs.
-
-Behavior tests should primarily assert relationships and bounds:
-
-```text
-up rather than exact y=-0.72
-moves toward person rather than exact x=0.63
-within geometry bounds rather than exact rectangle coordinates
-performance does not modify mood color
-```
-
-This keeps the verification system useful during animation tuning instead of turning every intentional visual adjustment into test-maintenance debris.
-
-## Performance and CI budget
-
-The runner should remain cheap enough to run on every push.
-
-At roughly 30 FPS for a few short synthetic scenarios, the face renderer processes only hundreds to low thousands of 64×64 NumPy frames. This should remain tiny compared with LLM/TTS workloads.
-
-No Ollama model, Whisper model, camera detector, Kokoro pipeline, microphone, or audio playback is started in CI.
-
-The behavior runner must fail if it accidentally requires any of those heavyweight runtime services.
-
-## Security and privacy
-
-CI scenarios contain synthetic state only.
-
-Do not upload:
-
-- real microphone recordings;
-- camera frames;
+- real camera frames;
+- microphone recordings;
 - user conversations;
-- SQLite memory databases;
+- `vess.db` or other memory stores;
 - local machine identifiers;
-- API keys or secrets.
-
-The generated GIF and trace represent synthetic scripted Vess behavior only.
+- credentials/secrets.
 
 ## Acceptance criteria
 
-The verification subsystem is complete when:
+Complete when all are true:
 
-1. a fresh GitHub Actions run automatically executes the full unittest suite;
-2. the real `State` + `FaceAnimator` + `face.py` path runs headlessly without camera/audio/model services;
-3. the same scenario/seed is deterministic;
-4. the conversational-cycle scenario generates a native-frame trace and viewable GIF;
-5. the trace contains interaction, gaze, face, eye, performance, and future independent-eye-offset fields;
-6. listening/thinking/speaking/geometry/performance hard invariants are evaluated automatically;
-7. invariant failures exit nonzero and identify scenario + frame/time + measured values;
-8. `summary.txt` reports measured values derived from the trace;
-9. the GitHub Actions job summary shows the readable result;
-10. `preview.gif`, `trace.json`, and `summary.txt` are uploaded as the `vess-behavior-verification` artifact;
-11. no LLM, Whisper, Kokoro, camera, microphone, or physical audio/display service is needed in CI;
-12. the system remains explicitly supplemental to final target-PC and subjective visual acceptance.
-
-## Explicitly out of scope
-
-- remote desktop or remote control of the owner's PC;
-- running Ollama/Qwen in GitHub Actions;
-- running Whisper in GitHub Actions;
-- generating or evaluating real speech;
-- real camera/person detection in CI;
-- automatic aesthetic scoring of the face;
-- GitHub Pages or a permanent dashboard;
-- storing historical trace analytics across every run;
-- automatic merge based on behavior scores;
-- replacing ordinary unit tests;
-- changing animator behavior merely to make the verification harness easier;
-- implementing independent whole-eye motion itself.
+1. pushes/PRs trigger GitHub Actions automatically;
+2. ordinary unit tests run in CI using `requirements-ci.txt`;
+3. `State` + real `FaceAnimator` + real `face.py` run headlessly without external model/hardware services;
+4. a fixed scenario + seed is deterministic;
+5. `conversational_cycle` generates a native-frame trace and GIF;
+6. trace includes interaction, gaze, whole-face, eye shape, performance, and future per-eye-offset fields;
+7. listening/thinking/speaking/performance/geometry hard invariants run automatically;
+8. failures identify scenario + frame/time + measured values;
+9. `summary.txt` contains metrics calculated from the trace;
+10. GitHub Actions displays the summary;
+11. `preview.gif`, `trace.json`, and `summary.txt` upload as `vess-behavior-verification`;
+12. CI starts no Ollama, Whisper, Kokoro, YOLO, camera, microphone, or physical audio/display path;
+13. final target-PC/subjective acceptance remains required where relevant.
