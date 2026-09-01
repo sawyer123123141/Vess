@@ -211,6 +211,7 @@ class TtsPipelineTests(unittest.TestCase):
         ]
         self.assertEqual(len(playback_events), 1)
         event = playback_events[0]
+        self.assertEqual(event["text"], "measured")
         self.assertEqual(event["leading_silence_ms"], 20.0)
         self.assertEqual(event["trailing_silence_ms"], 30.0)
 
