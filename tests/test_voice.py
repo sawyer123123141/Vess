@@ -24,11 +24,17 @@ class VoiceOutputTests(unittest.TestCase):
     def test_voice_plays_in_order_and_clears_speaking(self) -> None:
         played: list[int] = []
         state = State()
+        engine = FakeTTSEngine(
+            lambda text, performance: SynthesisResult(
+                np.array([len(text)], dtype=np.float32),
+                24_000,
+            )
+        )
         voice = VoiceOutput(
             CONFIG,
             state,
             RecordingLog(),
-            synthesize=lambda text: np.array([len(text)], dtype=np.float32),
+            engine=engine,
             play=lambda audio, _: played.append(int(audio[0])),
         )
 
