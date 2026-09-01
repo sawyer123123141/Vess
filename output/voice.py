@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -94,28 +95,45 @@ class VoiceOutput:
 
     def _speak(self, text: str) -> None:
         self._state.record_debug("tts_started", text=text)
+        synthesis_started = time.perf_counter()
         try:
             audio = self._synthesize_text(text)
         except Exception as error:
             self._event_log.append("voice_error", {"error": str(error), "text": text})
             self._state.record_debug("tts_error", error=str(error), text=text)
             return
-        self._play_waveform(audio)
+        synthesis_ms = (time.perf_counter() - synthesis_started) * 1000.0
+        self._play_waveform(audio, synthesis_ms=synthesis_ms)
         self._state.record_debug("tts_complete", text=text)
 
-    def _play_waveform(self, audio: np.ndarray) -> None:
+    def _play_waveform(
+        self,
+        audio: np.ndarray,
+        *,
+        synthesis_ms: float | None = None,
+    ) -> None:
+        played = False
         with self._state.locked():
             self._state.speaking = True
         try:
             if audio.size:
                 sample_rate = int(self._config.get("voice", {}).get("sample_rate", 24_000))
+                payload: dict[str, object] = {}
+                if synthesis_ms is not None:
+                    rounded = round(synthesis_ms, 1)
+                    payload["synthesis_ms"] = rounded
+                    self._state.update_debug(tts_synthesis_ms=rounded)
+                self._state.record_debug("tts_playback_started", **payload)
                 self._play(audio, sample_rate)
+                played = True
         except Exception as error:
             self._event_log.append("voice_error", {"error": str(error)})
             self._state.record_debug("tts_error", error=str(error))
         finally:
             with self._state.locked():
                 self._state.speaking = False
+                if played:
+                    self._state.last_spoke = time.time()
 
     def _synthesize_text(self, text: str) -> np.ndarray:
         if self._synthesize is None:
