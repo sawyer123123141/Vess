@@ -41,6 +41,17 @@ def _clamp(value: float, low: float, high: float) -> float:
     return min(max(value, low), high)
 
 
+def _number(value: object, default: float) -> float:
+    """Return a finite numeric config value or its safe default."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if number != number or number in (float("inf"), float("-inf")):
+        return default
+    return number
+
+
 def load_performance_definitions(
     raw: dict[str, object],
 ) -> dict[str, dict[str, object]]:
@@ -51,19 +62,23 @@ def load_performance_definitions(
     cleaned: dict[str, dict[str, object]] = {}
     for name, value in raw.items():
         entry = value if isinstance(value, dict) else {}
-        intensity = _clamp(float(entry.get("intensity", 0.0)), 0.0, 1.0)
+        intensity = _clamp(_number(entry.get("intensity", 0.0), 0.0), 0.0, 1.0)
 
         shape_value = entry.get("shape", {})
         shape_raw = shape_value if isinstance(shape_value, dict) else {}
         shape = {
-            key: _clamp(float(shape_raw.get(key, 0.0)), low, high)
+            key: _clamp(_number(shape_raw.get(key, 0.0), 0.0), low, high)
             for key, (low, high) in _SHAPE_LIMITS.items()
         }
 
         movement_value = entry.get("movement", {})
         movement_raw = movement_value if isinstance(movement_value, dict) else {}
         movement = {
-            key: _clamp(float(movement_raw.get(key, _MOVEMENT_DEFAULTS[key])), low, high)
+            key: _clamp(
+                _number(movement_raw.get(key, _MOVEMENT_DEFAULTS[key]), _MOVEMENT_DEFAULTS[key]),
+                low,
+                high,
+            )
             for key, (low, high) in _MOVEMENT_LIMITS.items()
         }
 
