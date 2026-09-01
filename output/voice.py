@@ -192,18 +192,12 @@ class VoiceOutput:
             return
 
         synthesis_ms: float | None = None
-        if (
-            self._acknowledgement_audio is None
-            or self._acknowledgement_sample_rate is None
-        ):
+        if self._acknowledgement_audio is None or self._acknowledgement_sample_rate is None:
             synthesis_started = time.perf_counter()
             self._prepare(self._acknowledgement)
             synthesis_ms = (time.perf_counter() - synthesis_started) * 1000.0
 
-        if (
-            self._acknowledgement_audio is None
-            or self._acknowledgement_sample_rate is None
-        ):
+        if self._acknowledgement_audio is None or self._acknowledgement_sample_rate is None:
             self._ready_slots.release()
             return
         if self._is_stale(generation_id):
@@ -396,11 +390,14 @@ class VoiceOutput:
         text: str,
         performance: PerformanceCue,
     ) -> SynthesisResult:
+        if self._engine is None and self._legacy_synthesize is None:
+            from output.tts.factory import create_tts_engine
+
+            self._engine = create_tts_engine(self._config)
+
         if self._engine is not None:
             return self._engine.synthesize(text, performance)
 
-        if self._legacy_synthesize is None:
-            self._legacy_synthesize = _make_synthesizer(self._config)
         audio = np.asarray(self._legacy_synthesize(text), dtype=np.float32).reshape(-1)
         sample_rate = int(self._config.get("voice", {}).get("sample_rate", 24_000))
         return SynthesisResult(audio, sample_rate)
@@ -457,27 +454,6 @@ def _trim_waveform_edges(
     start = max(0, first - leading_keep)
     end = min(samples.size, last + 1 + trailing_keep)
     return samples[start:end].copy()
-
-
-def _make_synthesizer(config: dict[str, Any]) -> Callable[[str], np.ndarray]:
-    """Legacy Kokoro construction retained until the engine factory lands."""
-    from kokoro import KPipeline
-
-    voice = config.get("voice", {}).get("name", "af_heart")
-    pipeline = KPipeline(lang_code="a", device="cpu")
-
-    def synthesize(text: str) -> np.ndarray:
-        parts: list[np.ndarray] = []
-        for result in pipeline(text, voice=voice):
-            audio = result.audio
-            if audio is None:
-                continue
-            if hasattr(audio, "detach"):
-                audio = audio.detach().cpu().numpy()
-            parts.append(np.asarray(audio, dtype=np.float32))
-        return np.concatenate(parts) if parts else np.array([], dtype=np.float32)
-
-    return synthesize
 
 
 def _play_audio(audio: np.ndarray, sample_rate: int) -> None:
