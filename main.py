@@ -140,11 +140,9 @@ def main() -> None:
         event_log,
         OllamaClient(),
         voice,
+        performances=performances,
     )
     audio = AudioLoop(config, state, event_log, conversation.submit)
-
-    # Loaded here so malformed human-authored performance config fails fast at startup.
-    _ = performances
 
     stop = threading.Event()
     thread, camera = _start_perception(config, state, stop)
