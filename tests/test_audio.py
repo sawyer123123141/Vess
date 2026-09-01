@@ -43,6 +43,20 @@ class UtteranceAssemblerTests(unittest.TestCase):
             np.array_equal(assembler.push(np.zeros(3)), np.array([0.2, 0.2]))
         )
 
+    def test_assembler_preserves_audio_immediately_before_trigger(self) -> None:
+        assembler = UtteranceAssembler(10, 0.1, 0.2, 0.3, 2.0)
+
+        self.assertIsNone(
+            assembler.push(np.array([0.05, 0.05, 0.2, 0.2, 0.0]))
+        )
+
+        self.assertTrue(
+            np.array_equal(
+                assembler.push(np.zeros(2)),
+                np.array([0.05, 0.05, 0.2, 0.2]),
+            )
+        )
+
     def test_assembler_reports_live_vad_status(self) -> None:
         assembler = UtteranceAssembler(10, 0.1, 0.2, 0.3, 2.0)
 
