@@ -4,55 +4,54 @@
 
 **Goal:** Add deterministic, headless Vess behavior verification that produces machine-checkable invariants, a frame-by-frame numeric trace, and a mobile-viewable GIF from the same real `State` + `FaceAnimator` + `face.py` simulation.
 
-**Architecture:** Expose one read-only `FaceAnimator.debug_snapshot()` containing the exact render parameters used on the most recent frame. A lightweight verification runner drives scripted `State` phases at fixed 30 FPS, captures native frames plus animator snapshots, checks invariants and metrics, then emits `trace.json`, `summary.txt`, and `preview.gif`. GitHub Actions runs ordinary unit tests first and only then runs the lightweight behavior preview job.
+**Architecture:** Expose one read-only `FaceAnimator.debug_snapshot()` containing the exact render parameters used on the most recent frame. A lightweight runner drives scripted `State` phases at fixed 30 FPS, captures the exact native frame and animator snapshot from every tick, checks invariants/metrics, and emits `trace.json`, `summary.txt`, and `preview.gif`. GitHub Actions runs the ordinary unit suite first and only then runs the lightweight behavior-preview job.
 
-**Tech Stack:** Python 3.11 in CI, standard library `dataclasses`/`argparse`/`json`/`hashlib`/`unittest`, NumPy, Pillow for GIF encoding, GitHub Actions.
+**Tech Stack:** Python 3.11 in CI, standard-library `dataclasses`/`argparse`/`json`/`hashlib`/`unittest`, NumPy, Pillow for GIF encoding, GitHub Actions.
 
 **Spec:** `docs/superpowers/specs/2026-09-01-remote-behavior-verification-design.md`
 
 ## Global Constraints
 
-- The verification harness must exercise production `State`, `FaceAnimator.tick`, and `face.render`; never create a second animator or redraw Vess independently.
-- Simulation runs at fixed `30 FPS` with `dt = 1.0 / 30.0`; no `sleep()` or wall-clock pacing.
-- Default deterministic RNG seed is `1`.
-- Scripted scenarios keep `State.mood_until = 0.0` unless specifically testing mood expiry elsewhere.
-- `trace.json`, invariant checks, and GIF frames must come from the same simulated ticks.
-- Exact gaze and whole-face offset in the trace must be the values actually passed to `face.render`, including drift/bob, not nearby pre-render internal values.
-- Hard invariant failures return exit code `1`; harness/configuration errors return `2`; success returns `0`.
-- Informational metrics do not fail CI in version 1.
-- Generated verification artifacts are not committed.
-- CI must never start Ollama, Whisper, Kokoro, YOLO, camera, microphone, physical audio playback, or a physical display path.
-- CI uses synthetic state only and never uploads conversations, camera frames, audio, databases, credentials, or local machine identifiers.
-- `requirements-ci.txt` stays lightweight; do not install the full runtime `requirements.txt` merely for the behavior preview.
-- No GitHub Pages, permanent dashboard, automatic aesthetic scoring, or automatic merge logic in this slice.
-- Independent whole-eye motion itself remains out of scope, but schema-v1 per-eye offset fields must exist and start at `0.0`.
+- Exercise production `State`, `FaceAnimator.tick`, and `face.render`; never create a second animator or redraw Vess independently.
+- Simulate at fixed `30 FPS`, `dt = 1.0 / 30.0`; no `sleep()` or wall-clock pacing.
+- Default RNG seed is `1`.
+- Scripted scenarios use `mood_until = 0.0` unless explicitly testing expiry elsewhere.
+- Trace, invariants, frame hashes, and GIF must derive from the same simulated ticks.
+- Trace the exact gaze and whole-face offset passed to `face.render`, including drift/bob.
+- Exit codes: `0` pass, `1` hard invariant failure, `2` harness/configuration error.
+- Informational metrics never fail CI in v1.
+- Generated artifacts are not committed.
+- CI must never start/import runtime paths that require Ollama, Whisper, Kokoro, YOLO, microphone, camera, physical audio playback, or physical display hardware.
+- CI uses synthetic state only and never uploads conversations, camera/audio captures, databases, credentials, or local-machine identifiers.
+- Keep `requirements-ci.txt` lightweight; do not install the runtime `requirements.txt` merely for preview verification.
+- No GitHub Pages, permanent dashboard, automatic aesthetic scoring, or automatic merge logic.
+- Independent whole-eye motion remains out of scope, but schema-v1 left/right eye offset fields exist and are `0.0` until production supports them.
 
 ---
 
 ## File Structure
 
-- Modify `output/animator.py`: retain exact render-time gaze/offset and expose one read-only diagnostic snapshot.
+- Modify `output/animator.py`: retain exact render-time gaze/offset and expose read-only diagnostics.
 - Create `tools/behavior_scenarios.py`: deterministic scenario data only.
-- Create `tools/render_behavior_preview.py`: simulation, trace capture, invariant checking, metrics, summary, GIF output, CLI.
-- Create `tests/test_behavior_verification.py`: harness, determinism, invariants, metrics, preview, and no-heavy-import tests.
-- Create `requirements-ci.txt`: lightweight dependencies needed by unit tests and CI preview.
-- Create `.github/workflows/verify.yml`: `unit-tests` then dependent `behavior-preview` job.
+- Create `tools/render_behavior_preview.py`: simulation, trace, invariants, metrics, summary, GIF, CLI.
+- Create `tests/test_behavior_verification.py`: harness tests and regression checks.
+- Create `requirements-ci.txt`: lightweight dependencies for repository tests.
+- Create `.github/workflows/verify.yml`: `unit-tests` then dependent `behavior-preview`.
 - Modify `.gitignore`: ignore `artifacts/behavior-verification/`.
 
 ---
 
-### Task 1: Expose Exact Render-Time Animator Diagnostics
+### Task 1: Exact Render-Time Animator Diagnostics
 
 **Files:**
 - Modify: `output/animator.py`
 - Modify: `tests/test_animator.py`
 
 **Interfaces:**
-- Produces: `FaceAnimator.debug_snapshot() -> dict[str, object]`.
-- Snapshot keys consumed later: `interaction_mode`, `render_gaze`, `render_offset`, `blink_openness`, `shape`, `color`, `fixation`, `speaking_break_active`, `speaking_break_remaining`, `performance_current`, `performance_target`.
-- The method is read-only and animator-local; it does not touch shared `State`.
+- Produces `FaceAnimator.debug_snapshot() -> dict[str, object]`.
+- Snapshot keys: `interaction_mode`, `render_gaze`, `render_offset`, `blink_openness`, `shape`, `color`, `fixation`, `speaking_break_active`, `speaking_break_remaining`, `performance_current`, `performance_target`.
 
-- [ ] **Step 1: Write failing tests for exact render diagnostics**
+- [ ] **Step 1: Write failing diagnostics tests**
 
 Add to `tests/test_animator.py`:
 
@@ -65,8 +64,8 @@ def test_debug_snapshot_reports_exact_values_used_for_render(self) -> None:
         performance=PerformanceCue("playful", 0.65),
     )
     animator = FaceAnimator(MOODS, PERFORMANCES, seed=1)
-
     animator.tick(state, 1.0 / 30.0)
+
     snapshot = animator.debug_snapshot()
 
     self.assertEqual(snapshot["interaction_mode"], "speaking")
@@ -76,20 +75,14 @@ def test_debug_snapshot_reports_exact_values_used_for_render(self) -> None:
     self.assertEqual(snapshot["color"], animator._last_color)
     self.assertEqual(snapshot["blink_openness"], animator._openness())
     self.assertEqual(snapshot["fixation"], animator._fixation)
-    self.assertEqual(
-        snapshot["speaking_break_active"],
-        animator._speak_break_left > 0.0,
-    )
-```
+    self.assertEqual(snapshot["speaking_break_active"], animator._speak_break_left > 0.0)
 
-Add immutability coverage:
 
-```python
-def test_debug_snapshot_returns_copies_of_mutable_animator_data(self) -> None:
+def test_debug_snapshot_returns_copies_of_mutable_data(self) -> None:
     animator = FaceAnimator(MOODS, PERFORMANCES, seed=1)
     animator.tick(State(), 1.0 / 30.0)
-
     snapshot = animator.debug_snapshot()
+
     snapshot["shape"]["l_h"] = 999.0
     snapshot["performance_current"]["hold_scale"] = 999.0
 
@@ -98,44 +91,33 @@ def test_debug_snapshot_returns_copies_of_mutable_animator_data(self) -> None:
     self.assertNotEqual(fresh["performance_current"]["hold_scale"], 999.0)
 ```
 
-- [ ] **Step 2: Run focused tests and verify RED**
-
-Run:
+- [ ] **Step 2: Verify RED**
 
 ```powershell
 python -m unittest tests.test_animator -v
 ```
 
-Expected: failures because `debug_snapshot`, `_last_render_gaze`, and `_last_render_offset` do not exist.
+Expected: diagnostics fields/method missing.
 
-- [ ] **Step 3: Store the exact values passed into `face.render`**
+- [ ] **Step 3: Store exact render values**
 
-In `FaceAnimator.__init__`, initialize:
+In `FaceAnimator.__init__`:
 
 ```python
 self._last_render_gaze: tuple[float, float] = (0.0, 0.0)
 self._last_render_offset: tuple[float, float] = (0.0, 0.0)
 ```
 
-In `tick`, immediately after computing:
-
-```python
-gaze = self._advance_gaze(...)
-offset = self._advance_face(...)
-```
-
-store:
+In `tick`, immediately after `_advance_gaze` and `_advance_face` return:
 
 ```python
 self._last_render_gaze = gaze
 self._last_render_offset = offset
 ```
 
-Do not use `self._gaze` for the trace because `_advance_gaze` adds visual drift after `_gaze` is updated. Do not use `face_offset` for the trace because `_advance_face` adds bob to the returned render offset.
+Do not substitute `self._gaze` because the returned gaze includes drift. Do not substitute `face_offset` because the returned offset includes bob.
 
-- [ ] **Step 4: Add the read-only diagnostic method**
-
-Add to `FaceAnimator`:
+- [ ] **Step 4: Add `debug_snapshot`**
 
 ```python
 def debug_snapshot(self) -> dict[str, object]:
@@ -154,19 +136,15 @@ def debug_snapshot(self) -> dict[str, object]:
     }
 ```
 
-This method only reports state already computed by the animator. It must not mutate RNG state, timers, `State`, or animation physics.
+The method must not mutate timers, RNG, animation physics, or shared `State`.
 
-- [ ] **Step 5: Run focused tests and verify GREEN**
-
-Run:
+- [ ] **Step 5: Verify GREEN**
 
 ```powershell
 python -m unittest tests.test_animator -v
 ```
 
-Expected: all animator tests pass.
-
-- [ ] **Step 6: Commit Task 1**
+- [ ] **Step 6: Commit**
 
 ```powershell
 git add output/animator.py tests/test_animator.py
@@ -175,7 +153,7 @@ git commit -m "test: expose animator render diagnostics"
 
 ---
 
-### Task 2: Deterministic Scenario Model and Native Trace Simulation
+### Task 2: Deterministic Scenarios and Native Trace Simulation
 
 **Files:**
 - Create: `tools/behavior_scenarios.py`
@@ -183,21 +161,20 @@ git commit -m "test: expose animator render diagnostics"
 - Create: `tests/test_behavior_verification.py`
 
 **Interfaces:**
-- Produces: `ScenarioPhase(name: str, duration_seconds: float, state: dict[str, object])`.
-- Produces: `BehaviorScenario(name: str, phases: tuple[ScenarioPhase, ...], seed: int = 1)`.
-- Produces: `get_scenario(name: str, *, moods: list[str], performances: dict[str, PerformanceCue]) -> BehaviorScenario`.
-- Produces: `phase_frame_count(phase: ScenarioPhase, fps: int) -> int`.
-- Produces: `apply_phase(state: State, phase: ScenarioPhase) -> None`.
-- Produces: `SimulationResult` with native frames, trace records, frame hashes, and failures.
-- Produces: `simulate_scenario(...) -> SimulationResult` using real `State`, `FaceAnimator`, and JSON configs.
+- `ScenarioPhase(name: str, duration_seconds: float, state: dict[str, object])`.
+- `BehaviorScenario(name: str, phases: tuple[ScenarioPhase, ...], seed: int = 1)`.
+- `phase_frame_count(phase, fps) -> int`.
+- `get_scenario(name, *, moods, performances) -> BehaviorScenario`.
+- `apply_phase(state, phase) -> None`.
+- `SimulationResult` contains `frames`, `frame_hashes`, `trace`, `failures`.
+- `simulate_scenario(name, *, fps=30, seed=1) -> SimulationResult`.
 
-- [ ] **Step 1: Write failing scenario and simulation tests**
+- [ ] **Step 1: Write failing scenario/simulation tests**
 
-Create `tests/test_behavior_verification.py` with:
+Create `tests/test_behavior_verification.py`:
 
 ```python
 import json
-import math
 import unittest
 
 import numpy as np
@@ -209,45 +186,38 @@ from tools.render_behavior_preview import apply_phase, simulate_scenario
 
 
 class BehaviorVerificationTests(unittest.TestCase):
-    def test_phase_duration_converts_to_deterministic_frame_count(self) -> None:
-        phase = ScenarioPhase("thinking", 1.5, {"thinking": True})
-        self.assertEqual(phase_frame_count(phase, 30), 45)
+    def test_phase_duration_converts_to_frame_count(self) -> None:
+        self.assertEqual(phase_frame_count(ScenarioPhase("thinking", 1.5, {}), 30), 45)
 
-    def test_apply_phase_changes_only_declared_state_fields(self) -> None:
+    def test_apply_phase_changes_only_declared_fields(self) -> None:
         state = State(
             mood="curious",
             listening=False,
             thinking=False,
-            speaking=False,
             person_present=True,
             person_pos=(0.2, 0.3),
         )
-        phase = ScenarioPhase("thinking", 1.0, {"thinking": True})
-
-        apply_phase(state, phase)
-
+        apply_phase(state, ScenarioPhase("thinking", 1.0, {"thinking": True}))
         self.assertTrue(state.thinking)
         self.assertEqual(state.mood, "curious")
         self.assertFalse(state.listening)
-        self.assertFalse(state.speaking)
         self.assertEqual(state.person_pos, (0.2, 0.3))
 
-    def test_conversational_cycle_has_expected_total_frames(self) -> None:
+    def test_conversational_cycle_is_twelve_seconds(self) -> None:
         scenario = get_scenario(
             "conversational_cycle",
             moods=["neutral"],
             performances={
                 "neutral": PerformanceCue(),
+                "thoughtful": PerformanceCue("thoughtful", 0.55),
                 "playful": PerformanceCue("playful", 0.65),
-                "emphatic": PerformanceCue("emphatic", 0.7),
+                "emphatic": PerformanceCue("emphatic", 0.70),
             },
         )
-        total = sum(phase_frame_count(phase, 30) for phase in scenario.phases)
-        self.assertEqual(total, 360)
+        self.assertEqual(sum(phase_frame_count(p, 30) for p in scenario.phases), 360)
 
-    def test_simulation_uses_native_frames_and_monotonic_trace(self) -> None:
+    def test_simulation_produces_native_frames_and_monotonic_trace(self) -> None:
         result = simulate_scenario("conversational_cycle", fps=30, seed=1)
-
         self.assertEqual(len(result.frames), 360)
         self.assertEqual(len(result.trace), 360)
         self.assertTrue(all(frame.shape == (64, 64, 3) for frame in result.frames))
@@ -258,17 +228,13 @@ class BehaviorVerificationTests(unittest.TestCase):
         json.dumps(result.trace)
 ```
 
-- [ ] **Step 2: Run focused tests and verify RED**
-
-Run:
+- [ ] **Step 2: Verify RED**
 
 ```powershell
 python -m unittest tests.test_behavior_verification -v
 ```
 
-Expected: import failures because the scenario and runner modules do not exist.
-
-- [ ] **Step 3: Implement scenario dataclasses and fixed scenarios**
+- [ ] **Step 3: Implement scenario types and dispatch**
 
 Create `tools/behavior_scenarios.py`:
 
@@ -301,68 +267,92 @@ def phase_frame_count(phase: ScenarioPhase, fps: int) -> int:
     if frames <= 0:
         raise ValueError(f"phase {phase.name!r} must contain at least one frame")
     return frames
+
+
+def _require_cue(performances: dict[str, PerformanceCue], name: str) -> PerformanceCue:
+    try:
+        return performances[name]
+    except KeyError as error:
+        raise ValueError(f"scenario requires performance {name!r}") from error
 ```
 
-Implement the primary scenario exactly:
+Primary scenario:
 
 ```python
 def _conversational_cycle(performances: dict[str, PerformanceCue]) -> BehaviorScenario:
-    neutral = performances.get("neutral", PerformanceCue())
-    playful = performances.get("playful", PerformanceCue("playful", 0.65))
-    emphatic = performances.get("emphatic", PerformanceCue("emphatic", 0.7))
+    neutral = _require_cue(performances, "neutral")
+    thoughtful = _require_cue(performances, "thoughtful")
+    playful = _require_cue(performances, "playful")
+    emphatic = _require_cue(performances, "emphatic")
     person = (0.80, 0.48)
-    return BehaviorScenario(
-        "conversational_cycle",
-        (
-            ScenarioPhase("idle", 1.0, {
-                "listening": False, "thinking": False, "speaking": False,
-                "person_present": False, "person_pos": None,
-                "mood": "neutral", "mood_until": 0.0, "performance": neutral,
-            }),
-            ScenarioPhase("tracking", 1.0, {
-                "listening": False, "thinking": False, "speaking": False,
-                "person_present": True, "person_pos": person,
-                "performance": neutral,
-            }),
-            ScenarioPhase("listening", 1.5, {
-                "listening": True, "thinking": False, "speaking": False,
-                "person_present": True, "person_pos": person,
-                "performance": neutral,
-            }),
-            ScenarioPhase("thinking", 1.5, {
-                "listening": False, "thinking": True, "speaking": False,
-                "person_present": True, "person_pos": person,
-                "performance": performances.get(
-                    "thoughtful", PerformanceCue("thoughtful", 0.55)
-                ),
-            }),
-            ScenarioPhase("speaking_neutral", 2.0, {
-                "listening": False, "thinking": False, "speaking": True,
-                "person_present": True, "person_pos": person,
-                "performance": neutral,
-            }),
-            ScenarioPhase("speaking_playful", 2.0, {
-                "listening": False, "thinking": False, "speaking": True,
-                "person_present": True, "person_pos": person,
-                "performance": playful,
-            }),
-            ScenarioPhase("speaking_emphatic", 2.0, {
-                "listening": False, "thinking": False, "speaking": True,
-                "person_present": True, "person_pos": person,
-                "performance": emphatic,
-            }),
-            ScenarioPhase("return_idle", 1.0, {
-                "listening": False, "thinking": False, "speaking": False,
-                "person_present": False, "person_pos": None,
-                "performance": neutral,
-            }),
-        ),
-    )
+    return BehaviorScenario("conversational_cycle", (
+        ScenarioPhase("idle", 1.0, {
+            "listening": False, "thinking": False, "speaking": False,
+            "person_present": False, "person_pos": None,
+            "mood": "neutral", "mood_until": 0.0, "performance": neutral,
+        }),
+        ScenarioPhase("tracking", 1.0, {
+            "listening": False, "thinking": False, "speaking": False,
+            "person_present": True, "person_pos": person, "performance": neutral,
+        }),
+        ScenarioPhase("listening", 1.5, {
+            "listening": True, "thinking": False, "speaking": False,
+            "person_present": True, "person_pos": person, "performance": neutral,
+        }),
+        ScenarioPhase("thinking", 1.5, {
+            "listening": False, "thinking": True, "speaking": False,
+            "person_present": True, "person_pos": person, "performance": thoughtful,
+        }),
+        ScenarioPhase("speaking_neutral", 2.0, {
+            "listening": False, "thinking": False, "speaking": True,
+            "person_present": True, "person_pos": person, "performance": neutral,
+        }),
+        ScenarioPhase("speaking_playful", 2.0, {
+            "listening": False, "thinking": False, "speaking": True,
+            "person_present": True, "person_pos": person, "performance": playful,
+        }),
+        ScenarioPhase("speaking_emphatic", 2.0, {
+            "listening": False, "thinking": False, "speaking": True,
+            "person_present": True, "person_pos": person, "performance": emphatic,
+        }),
+        ScenarioPhase("return_idle", 1.0, {
+            "listening": False, "thinking": False, "speaking": False,
+            "person_present": False, "person_pos": None, "performance": neutral,
+        }),
+    ))
 ```
 
-Implement `priority_conflicts` with five 0.5-second phases: idle; tracking; speaking; thinking+speaking; listening+thinking+speaking. Keep a person at `(0.80, 0.48)` in every non-idle phase.
+Priority-conflict scenario:
 
-Implement geometry stress as a generated deterministic scenario:
+```python
+def _priority_conflicts(performances: dict[str, PerformanceCue]) -> BehaviorScenario:
+    neutral = _require_cue(performances, "neutral")
+    person = (0.80, 0.48)
+    return BehaviorScenario("priority_conflicts", (
+        ScenarioPhase("idle", 0.5, {
+            "listening": False, "thinking": False, "speaking": False,
+            "person_present": False, "person_pos": None, "performance": neutral,
+        }),
+        ScenarioPhase("tracking", 0.5, {
+            "listening": False, "thinking": False, "speaking": False,
+            "person_present": True, "person_pos": person,
+        }),
+        ScenarioPhase("speaking", 0.5, {
+            "listening": False, "thinking": False, "speaking": True,
+            "person_present": True, "person_pos": person,
+        }),
+        ScenarioPhase("thinking_over_speaking", 0.5, {
+            "listening": False, "thinking": True, "speaking": True,
+            "person_present": True, "person_pos": person,
+        }),
+        ScenarioPhase("listening_over_all", 0.5, {
+            "listening": True, "thinking": True, "speaking": True,
+            "person_present": True, "person_pos": person,
+        }),
+    ))
+```
+
+Geometry stress:
 
 ```python
 def _geometry_stress(
@@ -374,7 +364,6 @@ def _geometry_stress(
     index = 0
     for mood in moods:
         for cue in performances.values():
-            position = positions[index % len(positions)]
             phases.append(ScenarioPhase(
                 f"stress_{mood}_{cue.expression}",
                 0.2,
@@ -386,25 +375,59 @@ def _geometry_stress(
                     "thinking": False,
                     "speaking": True,
                     "person_present": True,
-                    "person_pos": position,
+                    "person_pos": positions[index % len(positions)],
                 },
             ))
             index += 1
     return BehaviorScenario("geometry_stress", tuple(phases))
 ```
 
-Add `get_scenario` dispatch that raises `KeyError` for unknown names.
+Dispatch:
 
-- [ ] **Step 4: Implement native simulation and trace assembly**
+```python
+def get_scenario(
+    name: str,
+    *,
+    moods: list[str],
+    performances: dict[str, PerformanceCue],
+) -> BehaviorScenario:
+    if name == "conversational_cycle":
+        return _conversational_cycle(performances)
+    if name == "priority_conflicts":
+        return _priority_conflicts(performances)
+    if name == "geometry_stress":
+        return _geometry_stress(moods, performances)
+    raise KeyError(f"unknown behavior scenario: {name}")
+```
 
-Create `tools/render_behavior_preview.py` with imports limited to standard library, NumPy, Pillow only in the GIF function, production `State`, `FaceAnimator`, `PerformanceCue`/loader, and scenario definitions.
+- [ ] **Step 4: Implement runner bootstrap and data types**
+
+The spec requires this exact CLI form:
+
+```powershell
+python tools/render_behavior_preview.py
+```
+
+A directly executed script gets `tools/` as `sys.path[0]`, so bootstrap the repository root **before** importing production modules:
+
+```python
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+```
+
+Then import only standard library, NumPy, and production face-stack modules. Pillow is imported later inside GIF encoding.
 
 Define:
 
 ```python
 from dataclasses import dataclass, field
 from hashlib import sha256
-from pathlib import Path
 import json
 
 import numpy as np
@@ -412,10 +435,8 @@ import numpy as np
 from output.animator import FaceAnimator
 from performance import PerformanceCue, cue_for_label, load_performance_definitions
 from state import State
-from tools.behavior_scenarios import BehaviorScenario, ScenarioPhase, get_scenario, phase_frame_count
+from tools.behavior_scenarios import ScenarioPhase, get_scenario, phase_frame_count
 
-
-ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_FPS = 30
 
 
@@ -440,7 +461,7 @@ class SimulationResult:
     failures: list[VerificationFailure] = field(default_factory=list)
 ```
 
-Add config loading:
+- [ ] **Step 5: Implement config loading and phase application**
 
 ```python
 def _load_json(path: Path) -> dict[str, object]:
@@ -451,18 +472,12 @@ def _load_runtime_definitions() -> tuple[dict[str, dict], dict[str, dict[str, ob
     moods = _load_json(ROOT / "moods.json")
     performances = load_performance_definitions(_load_json(ROOT / "performance.json"))
     return moods, performances
-```
 
-Add cue map:
 
-```python
 def _performance_cues(definitions: dict[str, dict[str, object]]) -> dict[str, PerformanceCue]:
     return {name: cue_for_label(name, definitions) for name in definitions}
-```
 
-Add phase application that validates fields and changes only declared fields:
 
-```python
 def apply_phase(state: State, phase: ScenarioPhase) -> None:
     with state.locked():
         for field_name, value in phase.state.items():
@@ -471,28 +486,23 @@ def apply_phase(state: State, phase: ScenarioPhase) -> None:
             setattr(state, field_name, value)
 ```
 
-Build one trace row from the exact post-`tick` snapshot:
+- [ ] **Step 6: Build one trace record from the exact post-tick snapshot**
 
 ```python
 def _trace_row(
-    *,
-    scenario: str,
-    phase: str,
-    frame_index: int,
-    fps: int,
-    state: State,
-    animator_snapshot: dict[str, object],
+    *, phase: str, frame_index: int, fps: int,
+    state: State, snapshot: dict[str, object],
 ) -> dict[str, object]:
-    shape = animator_snapshot["shape"]
-    gaze_x, gaze_y = animator_snapshot["render_gaze"]
-    face_x, face_y = animator_snapshot["render_offset"]
+    shape = snapshot["shape"]
+    gaze_x, gaze_y = snapshot["render_gaze"]
+    face_x, face_y = snapshot["render_offset"]
     with state.locked():
         person = state.person_pos
-        row = {
+        return {
             "frame": frame_index,
             "time_seconds": frame_index / fps,
             "phase": phase,
-            "interaction_mode": animator_snapshot["interaction_mode"],
+            "interaction_mode": snapshot["interaction_mode"],
             "mood": state.mood,
             "performance_expression": state.performance.expression,
             "performance_intensity": state.performance.intensity,
@@ -506,7 +516,7 @@ def _trace_row(
             "gaze_y": gaze_y,
             "face_offset_x": face_x,
             "face_offset_y": face_y,
-            "blink_openness": animator_snapshot["blink_openness"],
+            "blink_openness": snapshot["blink_openness"],
             "left_eye_x": shape["l_cx"],
             "left_eye_y": shape["l_cy"],
             "right_eye_x": shape["r_cx"],
@@ -521,26 +531,28 @@ def _trace_row(
             "right_eye_height": shape["r_h"],
             "left_eye_slant": shape["l_slant"],
             "right_eye_slant": shape["r_slant"],
-            "color_r": animator_snapshot["color"][0],
-            "color_g": animator_snapshot["color"][1],
-            "color_b": animator_snapshot["color"][2],
-            "fixation_x": animator_snapshot["fixation"][0],
-            "fixation_y": animator_snapshot["fixation"][1],
-            "speaking_break_active": animator_snapshot["speaking_break_active"],
-            "speaking_break_remaining": animator_snapshot["speaking_break_remaining"],
-            "performance_current": dict(animator_snapshot["performance_current"]),
-            "performance_target": dict(animator_snapshot["performance_target"]),
+            "color_r": snapshot["color"][0],
+            "color_g": snapshot["color"][1],
+            "color_b": snapshot["color"][2],
+            "fixation_x": snapshot["fixation"][0],
+            "fixation_y": snapshot["fixation"][1],
+            "speaking_break_active": snapshot["speaking_break_active"],
+            "speaking_break_remaining": snapshot["speaking_break_remaining"],
+            "performance_current": dict(snapshot["performance_current"]),
+            "performance_target": dict(snapshot["performance_target"]),
         }
-    return row
 ```
 
-Implement `simulate_scenario`:
+- [ ] **Step 7: Implement simulation**
 
 ```python
 def simulate_scenario(name: str, *, fps: int = DEFAULT_FPS, seed: int = 1) -> SimulationResult:
     moods, definitions = _load_runtime_definitions()
-    cues = _performance_cues(definitions)
-    scenario = get_scenario(name, moods=list(moods), performances=cues)
+    scenario = get_scenario(
+        name,
+        moods=list(moods),
+        performances=_performance_cues(definitions),
+    )
     state = State(mood_until=0.0)
     animator = FaceAnimator(moods, definitions, seed=seed)
     result = SimulationResult(name, fps, seed)
@@ -554,87 +566,78 @@ def simulate_scenario(name: str, *, fps: int = DEFAULT_FPS, seed: int = 1) -> Si
             result.frames.append(frame.copy())
             result.frame_hashes.append(sha256(frame.tobytes()).hexdigest())
             result.trace.append(_trace_row(
-                scenario=name,
                 phase=phase.name,
                 frame_index=frame_index,
                 fps=fps,
                 state=state,
-                animator_snapshot=snapshot,
+                snapshot=snapshot,
             ))
             frame_index += 1
     return result
 ```
 
-- [ ] **Step 5: Run focused tests and verify GREEN**
-
-Run:
+- [ ] **Step 8: Verify GREEN and commit**
 
 ```powershell
 python -m unittest tests.test_behavior_verification -v
-```
-
-Expected: scenario/frame/trace tests pass.
-
-- [ ] **Step 6: Commit Task 2**
-
-```powershell
 git add tools/behavior_scenarios.py tools/render_behavior_preview.py tests/test_behavior_verification.py
 git commit -m "feat: add deterministic face behavior simulation"
 ```
 
 ---
 
-### Task 3: Hard Invariants, Determinism, Metrics, and Text Summary
+### Task 3: Hard Invariants, Determinism, Metrics, and Summary
 
 **Files:**
 - Modify: `tools/render_behavior_preview.py`
 - Modify: `tests/test_behavior_verification.py`
+- Modify: `tests/test_animator.py`
 
 **Interfaces:**
-- Produces: `check_invariants(result: SimulationResult) -> list[VerificationFailure]`.
-- Produces: `verify_determinism(name: str, *, fps: int, seed: int) -> list[VerificationFailure]`.
-- Produces: `calculate_metrics(result: SimulationResult) -> dict[str, object]`.
-- Produces: `build_summary(results: list[SimulationResult], deterministic: bool) -> str`.
-- Later tasks consume `summary`, `failures`, and primary trace.
+- `check_invariants(result) -> list[VerificationFailure]`.
+- `verify_determinism(name, *, fps, seed) -> list[VerificationFailure]`.
+- `calculate_metrics(result) -> dict[str, object]`.
+- `build_summary(results, *, deterministic) -> str`.
 
-- [ ] **Step 1: Write failing invariant and determinism tests**
+- [ ] **Step 1: Write failing invariant/metrics tests**
 
-Add tests:
+Add:
 
 ```python
-from tools.render_behavior_preview import (
-    SimulationResult,
-    VerificationFailure,
-    build_summary,
-    calculate_metrics,
-    check_invariants,
-    verify_determinism,
-)
-
-
 def test_same_scenario_and_seed_are_deterministic(self) -> None:
-    failures = verify_determinism("conversational_cycle", fps=30, seed=1)
-    self.assertEqual(failures, [])
+    self.assertEqual(
+        verify_determinism("conversational_cycle", fps=30, seed=1),
+        [],
+    )
 
 
-def test_global_invariant_reports_exact_bad_frame(self) -> None:
+def test_bad_gaze_reports_exact_frame(self) -> None:
     result = simulate_scenario("conversational_cycle", fps=30, seed=1)
     result.trace[10]["gaze_y"] = -1.25
-
-    failures = check_invariants(result)
-
-    failure = next(item for item in failures if item.invariant == "gaze bounds")
+    failure = next(f for f in check_invariants(result) if f.invariant == "gaze bounds")
     self.assertEqual(failure.frame, 10)
     self.assertEqual(failure.phase, result.trace[10]["phase"])
     self.assertEqual(failure.observed["gaze_y"], -1.25)
 
 
-def test_metrics_are_calculated_from_trace_not_constants(self) -> None:
+def test_priority_conflict_scenario_checks_full_mode_order(self) -> None:
+    result = simulate_scenario("priority_conflicts", fps=30, seed=1)
+    self.assertEqual(check_invariants(result), [])
+    final_modes = {
+        row["phase"]: row["interaction_mode"]
+        for row in result.trace
+        if row["frame"] % 15 == 14
+    }
+    self.assertEqual(final_modes["tracking"], "tracking")
+    self.assertEqual(final_modes["speaking"], "speaking")
+    self.assertEqual(final_modes["thinking_over_speaking"], "thinking")
+    self.assertEqual(final_modes["listening_over_all"], "listening")
+
+
+def test_metrics_are_calculated_from_trace(self) -> None:
     result = simulate_scenario("conversational_cycle", fps=30, seed=1)
     metrics = calculate_metrics(result)
-    speaking_rows = [row for row in result.trace if row["speaking"]]
-
-    self.assertEqual(metrics["speaking_frames"], len(speaking_rows))
+    self.assertEqual(metrics["speaking_frames"], sum(bool(r["speaking"]) for r in result.trace))
     self.assertGreaterEqual(metrics["person_directed_percent"], 0.0)
     self.assertLessEqual(metrics["person_directed_percent"], 100.0)
 ```
@@ -642,60 +645,48 @@ def test_metrics_are_calculated_from_trace_not_constants(self) -> None:
 Add summary failure coverage:
 
 ```python
-def test_summary_names_scenario_frame_time_and_values_on_failure(self) -> None:
+def test_summary_names_failure_location_and_values(self) -> None:
     result = simulate_scenario("conversational_cycle", fps=30, seed=1)
     result.failures.append(VerificationFailure(
-        scenario=result.scenario,
-        phase="thinking",
-        frame=143,
-        time_seconds=143 / 30.0,
-        invariant="gaze bounds",
-        observed={"gaze_y": -1.083},
+        result.scenario, "thinking", 143, 143 / 30.0,
+        "gaze bounds", {"gaze_y": -1.083},
     ))
-
     summary = build_summary([result], deterministic=True)
-    self.assertIn("conversational_cycle", summary)
     self.assertIn("frame 143", summary)
     self.assertIn("gaze bounds", summary)
     self.assertIn("-1.083", summary)
 ```
 
-- [ ] **Step 2: Run focused tests and verify RED**
-
-Run:
+- [ ] **Step 2: Verify RED**
 
 ```powershell
 python -m unittest tests.test_behavior_verification -v
 ```
 
-Expected: failures because invariant/metric/summary functions do not exist.
-
-- [ ] **Step 3: Implement finite/global/geometry invariants**
-
-In `tools/render_behavior_preview.py`, define explicit geometry safety margin:
+- [ ] **Step 3: Implement global/geometry helpers**
 
 ```python
+import math
+from output.animator import _SPEAK_BREAK_LENGTH
+
 _PANEL_MIN = 1.0
 _PANEL_MAX = 63.0
-```
+_TRANSITION_SECONDS = 0.25
 
-Add helpers:
 
-```python
-def _finite_numbers(value: object) -> bool:
-    if isinstance(value, bool) or value is None or isinstance(value, str):
+def _finite(value: object) -> bool:
+    if value is None or isinstance(value, (bool, str)):
         return True
     if isinstance(value, (int, float)):
         return math.isfinite(float(value))
     if isinstance(value, dict):
-        return all(_finite_numbers(item) for item in value.values())
-    if isinstance(value, (tuple, list)):
-        return all(_finite_numbers(item) for item in value)
+        return all(_finite(v) for v in value.values())
+    if isinstance(value, (list, tuple)):
+        return all(_finite(v) for v in value)
     return True
 
 
-def _eye_bounds(row: dict[str, object], side: str) -> tuple[float, float, float, float]:
-    prefix = "left" if side == "l" else "right"
+def _eye_bounds(row: dict[str, object], prefix: str) -> tuple[float, float, float, float]:
     cx = float(row[f"{prefix}_eye_x"]) + float(row["face_offset_x"]) + float(row[f"{prefix}_eye_offset_x"])
     cy = float(row[f"{prefix}_eye_y"]) + float(row["face_offset_y"]) + float(row[f"{prefix}_eye_offset_y"])
     width = float(row[f"{prefix}_eye_width"])
@@ -707,164 +698,188 @@ def _eye_bounds(row: dict[str, object], side: str) -> tuple[float, float, float,
         cx + width / 2.0,
         cy + height / 2.0 + slant,
     )
-```
 
-For every row, hard-fail when:
 
-```python
-not _finite_numbers(row)
-not (-1.0 <= gaze_x <= 1.0 and -1.0 <= gaze_y <= 1.0)
-not (0.0 <= performance_intensity <= 1.0)
-left/right width <= 0.0
-left/right height < 2.0
-any eye bound < _PANEL_MIN or > _PANEL_MAX
-```
-
-Also verify each native frame is `(64, 64, 3)` and `np.uint8`.
-
-Build failures through one helper:
-
-```python
-def _failure(result: SimulationResult, row: dict[str, object], invariant: str, **observed: object) -> VerificationFailure:
+def _failure(result, row, invariant: str, **observed: object) -> VerificationFailure:
     return VerificationFailure(
-        scenario=result.scenario,
-        phase=str(row["phase"]),
-        frame=int(row["frame"]),
-        time_seconds=float(row["time_seconds"]),
-        invariant=invariant,
-        observed=observed,
+        result.scenario,
+        str(row["phase"]),
+        int(row["frame"]),
+        float(row["time_seconds"]),
+        invariant,
+        observed,
     )
 ```
 
-- [ ] **Step 4: Implement interaction and performance invariants**
-
-Use the first `0.25 s` of each phase as a transition allowance:
+For each row/frame, fail on:
 
 ```python
-_transition_frames = max(1, int(round(0.25 * result.fps)))
+not _finite(row)
+frame.shape != (64, 64, 3)
+frame.dtype != np.uint8
+not (-1.0 <= gaze_x <= 1.0 and -1.0 <= gaze_y <= 1.0)
+not (0.0 <= performance_intensity <= 1.0)
+left/right eye width <= 0.0
+left/right eye height < 2.0
+any composed eye bound < _PANEL_MIN or > _PANEL_MAX
 ```
 
-Group rows by contiguous `phase` name.
+Geometry uses composed eye centers + whole-face offset + per-eye offsets + width/height/slant, never static config alone.
+
+- [ ] **Step 4: Implement generic interaction-priority invariant**
+
+For every stable row after the first `round(0.25 * fps)` frames of each phase:
+
+```python
+def _expected_mode(row: dict[str, object]) -> str:
+    if row["listening"]:
+        return "listening"
+    if row["thinking"]:
+        return "thinking"
+    if row["speaking"]:
+        return "speaking"
+    if row["person_present"] and row["person_x"] is not None:
+        return "tracking"
+    return "idle"
+```
+
+Hard-fail if `interaction_mode != _expected_mode(row)`. This single rule proves:
+
+```text
+listening > thinking > speaking > tracking > idle
+```
+
+including the overlap scenario.
+
+- [ ] **Step 5: Implement listening/thinking/speaking invariants**
+
+Group trace rows into contiguous phases and skip the transition allowance.
 
 Listening stable rows:
 
 ```python
-interaction_mode == "listening"
-fixation_x/fixation_y remain equal to the first stable listening row
-if person_x > 0.5, gaze_x > -0.05
-if person_x < 0.5, gaze_x < 0.05
-face_offset_x has the same horizontal sign as person_x - 0.5
+fixation remains unchanged through the stable phase
+person_direction_dot = gaze_x * (person_x - 0.5) + gaze_y * (person_y - 0.5)
+person_direction_dot > 0.0
+face_offset_x * (person_x - 0.5) > 0.0
 ```
 
 Thinking stable rows:
 
 ```python
-interaction_mode == "thinking"
 gaze_y < 0.0
-fixation remains constant through the phase
+fixation remains unchanged through the stable phase
 ```
 
-Speaking stable rows:
+Speaking stable rows with a person, excluding `speaking_break_active` rows:
 
 ```python
-interaction_mode == "speaking"
+person_direction_dot = gaze_x * (person_x - 0.5) + gaze_y * (person_y - 0.5)
 ```
 
-For non-break speaking rows with a person present, count person-directed rows using a general direction dot product:
+The spec says **most** non-break speaking frames are person-directed, so the hard requirement is mathematically minimal and non-arbitrary:
 
 ```python
-person_dx = float(row["person_x"]) - 0.5
-person_dy = float(row["person_y"]) - 0.5
-person_directed = float(row["gaze_x"]) * person_dx + float(row["gaze_y"]) * person_dy > 0.0
+person_directed_percent > 50.0
 ```
 
-Hard-fail if fewer than `70%` of stable, non-break speaking rows are person-directed. This threshold encodes only the spec word "most" and deliberately leaves room for drift/easing; metrics will report the exact percentage.
+Do not invent a 70/80/90% threshold before real regressions justify one.
 
-Measure contiguous `speaking_break_active` runs. Import the production range instead of duplicating it:
-
-```python
-from output.animator import _SPEAK_BREAK_LENGTH
-```
-
-For each observed completed break, require duration within:
+Measure contiguous observed speaking breaks. For each completed run:
 
 ```python
 low = _SPEAK_BREAK_LENGTH[0] - 1.0 / result.fps
 high = _SPEAK_BREAK_LENGTH[1] + 1.0 / result.fps
 ```
 
-Do not require any break to occur.
+Require duration inside `[low, high]`. Never require a break to occur.
 
-Performance target invariants use `performance_target`, not eased `performance_current`:
+- [ ] **Step 6: Implement performance invariants and exact color regression test**
+
+For rows whose `performance_expression == "neutral"`, require `performance_target` to contain:
 
 ```python
-if performance_expression == "neutral":
-    shape fields == 0.0
-    hold_scale/ease_scale/track_bias_scale/speaking_break_scale == 1.0
-    gaze_y_bias == 0.0
+shape deltas l_h/r_h/l_slant/r_slant/l_cy/r_cy == 0.0
+hold_scale/ease_scale/track_bias_scale/speaking_break_scale == 1.0
+gaze_y_bias == 0.0
 ```
 
-Unknown performance fallback is covered with a focused test using a fresh animator/state:
+Add to `tests/test_animator.py`:
 
 ```python
-def test_unknown_performance_expression_targets_neutral(self) -> None:
+def test_performance_overlay_does_not_change_mood_color(self) -> None:
+    neutral_state = State(mood="curious", performance=PerformanceCue())
+    playful_state = State(
+        mood="curious",
+        performance=PerformanceCue("playful", 0.65),
+    )
+    neutral = FaceAnimator(MOODS, PERFORMANCES, seed=1)
+    playful = FaceAnimator(MOODS, PERFORMANCES, seed=1)
+
+    for _ in range(30):
+        neutral.tick(neutral_state, 1.0 / 30.0)
+        playful.tick(playful_state, 1.0 / 30.0)
+
+    self.assertEqual(
+        neutral.debug_snapshot()["color"],
+        playful.debug_snapshot()["color"],
+    )
+```
+
+Add to verification tests:
+
+```python
+def test_unknown_performance_targets_neutral(self) -> None:
     moods, definitions = _load_runtime_definitions()
-    state = State(performance=PerformanceCue("not-real", 1.0))
     animator = FaceAnimator(moods, definitions, seed=1)
-    animator.tick(state, 1 / 30)
+    animator.tick(State(performance=PerformanceCue("not-real", 1.0)), 1.0 / 30.0)
     target = animator.debug_snapshot()["performance_target"]
     self.assertEqual(target["l_h"], 0.0)
     self.assertEqual(target["hold_scale"], 1.0)
 ```
 
-Add a focused production-composition test that two fresh animators with the same mood but neutral/playful performance keep identical rendered color after the same number of ticks.
-
-- [ ] **Step 5: Implement determinism verification**
+- [ ] **Step 7: Implement determinism**
 
 ```python
 def verify_determinism(name: str, *, fps: int, seed: int) -> list[VerificationFailure]:
     first = simulate_scenario(name, fps=fps, seed=seed)
     second = simulate_scenario(name, fps=fps, seed=seed)
-    if first.frame_hashes == second.frame_hashes and first.trace == second.trace:
+    if first.trace == second.trace and first.frame_hashes == second.frame_hashes:
         return []
     row = first.trace[0] if first.trace else {"phase": "<none>", "frame": 0, "time_seconds": 0.0}
     return [_failure(
-        first,
-        row,
-        "determinism",
+        first, row, "determinism",
         trace_equal=first.trace == second.trace,
         frame_hashes_equal=first.frame_hashes == second.frame_hashes,
     )]
 ```
 
-Exact equality is appropriate because both runs execute identical floating-point operations in the same process with the same seed. Do not round trace values merely to force determinism.
+Do not round trace values to manufacture equality.
 
-- [ ] **Step 6: Implement metrics from trace data**
+- [ ] **Step 8: Implement metrics**
 
-`calculate_metrics(result)` returns at least:
+`calculate_metrics(result)` returns:
 
 ```python
 {
     "total_frames": len(result.trace),
-    "speaking_frames": ..., 
-    "person_directed_percent": ..., 
-    "speaking_break_count": ..., 
-    "average_break_seconds": ..., 
-    "max_break_seconds": ..., 
-    "peak_face_offset": ..., 
-    "max_frame_gaze_delta": ..., 
-    "max_frame_face_delta": ..., 
-    "performance_eye_deltas": {...},
+    "speaking_frames": <int>,
+    "person_directed_percent": <float>,
+    "speaking_break_count": <int>,
+    "average_break_seconds": <float | None>,
+    "max_break_seconds": <float | None>,
+    "peak_face_offset": <float>,
+    "max_frame_gaze_delta": <float>,
+    "max_frame_face_delta": <float>,
+    "performance_eye_deltas": <dict>,
 }
 ```
 
-Use `math.hypot` for vector magnitudes.
+Use `math.hypot` for vector magnitudes. `performance_eye_deltas` compares stable performance-speaking rows against the most recent stable `speaking_neutral` baseline; if no baseline exists, return `{}`.
 
-For `performance_eye_deltas`, compare each expression's rows against the most recent stable neutral-speaking baseline shape in the same conversational scenario. Report max absolute left/right height delta and max left/right slant delta. If a scenario has no neutral baseline, return an empty mapping instead of inventing values.
+- [ ] **Step 9: Implement generated summary**
 
-- [ ] **Step 7: Implement generated summary text**
-
-`build_summary(results, deterministic)` must derive all counts/metrics from passed results. Structure:
+`build_summary(results, deterministic=...)` derives all numbers from passed results. Required shape:
 
 ```text
 Vess behavior verification
@@ -880,45 +895,34 @@ Conversational cycle
   speaking mode: PASS|FAIL
   speaking person-directed frames: <percent>%
   speaking gaze breaks: <count>
-  average break duration: <seconds> s
+  average break duration: <seconds|n/a> s
   peak face offset: <pixels> px
 
 Performance
   <expression> max eye-height delta: L <value> / R <value> px
 ```
 
-Append one failure block per failure:
+Every failure appends:
 
 ```text
-FAIL <scenario> frame <frame> (<time_seconds> s)
+FAIL <scenario> frame <frame> (<time> s)
 Invariant: <invariant>
-Observed: <json-encoded observed dict>
-Mode: <interaction mode when available>
-Performance: <performance expression when available>
+Observed: <JSON observed values>
 ```
 
-Do not print example constants when data is absent; use `n/a`.
+Never substitute example metrics when data is absent; use `n/a`.
 
-- [ ] **Step 8: Run focused tests and verify GREEN**
-
-Run:
+- [ ] **Step 10: Verify GREEN and commit**
 
 ```powershell
 python -m unittest tests.test_behavior_verification tests.test_animator -v
-```
-
-Expected: all verification and animator tests pass.
-
-- [ ] **Step 9: Commit Task 3**
-
-```powershell
 git add tools/render_behavior_preview.py tests/test_behavior_verification.py tests/test_animator.py
 git commit -m "test: add behavior invariants and metrics"
 ```
 
 ---
 
-### Task 4: Artifact Output, GIF Preview, and CLI Exit Contract
+### Task 4: GIF, Trace Artifact, Summary Artifact, and CLI Contract
 
 **Files:**
 - Modify: `tools/render_behavior_preview.py`
@@ -926,33 +930,25 @@ git commit -m "test: add behavior invariants and metrics"
 - Modify: `.gitignore`
 
 **Interfaces:**
-- Produces: `write_trace(result, output_dir) -> Path`.
-- Produces: `write_preview(result, output_dir, *, sample_every: int = 2, scale: int = 6) -> Path`.
-- Produces: `run_verification(...) -> tuple[int, str]`.
-- CLI: `python tools/render_behavior_preview.py [--scenario NAME] [--seed N] [--output PATH] [--no-gif]`.
+- `write_trace(result, output_dir) -> Path`.
+- `write_preview(result, output_dir, *, sample_every=2, scale=6) -> Path`.
+- `run_verification(...) -> tuple[int, str]`.
+- CLI: `python tools/render_behavior_preview.py [--scenario ...] [--seed ...] [--output ...] [--no-gif]`.
 
-- [ ] **Step 1: Write failing artifact/CLI tests**
+- [ ] **Step 1: Write failing artifact tests**
 
-Add imports:
+Add:
 
 ```python
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
-
 from PIL import Image
-from tools.render_behavior_preview import run_verification, write_preview, write_trace
-```
 
-Add tests:
 
-```python
-def test_write_trace_uses_schema_v1_and_primary_native_trace(self) -> None:
+def test_write_trace_uses_schema_v1(self) -> None:
     result = simulate_scenario("conversational_cycle", fps=30, seed=1)
     with tempfile.TemporaryDirectory() as directory:
-        path = write_trace(result, Path(directory))
-        payload = json.loads(path.read_text(encoding="utf-8"))
-
+        payload = json.loads(write_trace(result, Path(directory)).read_text(encoding="utf-8"))
     self.assertEqual(payload["schema_version"], 1)
     self.assertEqual(payload["fps"], 30)
     self.assertEqual(payload["seed"], 1)
@@ -960,60 +956,55 @@ def test_write_trace_uses_schema_v1_and_primary_native_trace(self) -> None:
     self.assertEqual(payload["frames"], result.trace)
 
 
-def test_preview_is_encoded_from_real_simulation_frames(self) -> None:
+def test_preview_preserves_a_real_nonblack_native_pixel(self) -> None:
     result = simulate_scenario("conversational_cycle", fps=30, seed=1)
-    first_pixel = tuple(int(v) for v in result.frames[0][0, 0])
+    native = result.frames[0]
+    y, x = np.argwhere(np.any(native != 0, axis=2))[0]
+    expected = tuple(int(v) for v in native[y, x])
+
     with tempfile.TemporaryDirectory() as directory:
         path = write_preview(result, Path(directory), sample_every=30, scale=2)
         image = Image.open(path)
         image.seek(0)
-        rendered = np.asarray(image.convert("RGB"))
+        encoded = np.asarray(image.convert("RGB"))
 
-    # The label strip is above the scaled native frame; native pixel (0,0)
-    # starts at y=24 in the encoded preview and is nearest-neighbor doubled.
-    self.assertEqual(tuple(int(v) for v in rendered[24, 0]), first_pixel)
+    self.assertEqual(tuple(int(v) for v in encoded[24 + y * 2, x * 2]), expected)
 
 
-def test_run_verification_writes_all_primary_artifacts(self) -> None:
+def test_run_verification_writes_primary_artifacts(self) -> None:
     with tempfile.TemporaryDirectory() as directory:
         code, summary = run_verification(output=Path(directory), include_gif=True)
-        names = {path.name for path in Path(directory).iterdir()}
-
+        names = {p.name for p in Path(directory).iterdir()}
     self.assertEqual(code, 0)
-    self.assertIn("preview.gif", names)
-    self.assertIn("trace.json", names)
-    self.assertIn("summary.txt", names)
+    self.assertEqual({"preview.gif", "trace.json", "summary.txt"} - names, set())
     self.assertIn("Vess behavior verification", summary)
 ```
 
-Add failure exit-code test by patching `check_invariants` to return one `VerificationFailure`; expect `run_verification` code `1`. Patch `_load_runtime_definitions` to raise `ValueError`; expect code `2` and a concise configuration-error summary.
+Add one test patching `check_invariants` to return a failure and expect code `1`; add one patching `_load_runtime_definitions` to raise `ValueError` and expect code `2` plus `summary.txt` containing `HARNESS ERROR`.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [ ] **Step 2: Verify RED**
 
 ```powershell
 python -m unittest tests.test_behavior_verification -v
 ```
 
-Expected: artifact functions/CLI orchestration missing.
-
-- [ ] **Step 3: Implement `trace.json` writing**
+- [ ] **Step 3: Implement `trace.json`**
 
 ```python
 def write_trace(result: SimulationResult, output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / "trace.json"
-    payload = {
+    path.write_text(json.dumps({
         "schema_version": 1,
         "fps": result.fps,
         "seed": result.seed,
         "scenario": result.scenario,
         "frames": result.trace,
-    }
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    }, indent=2, sort_keys=True), encoding="utf-8")
     return path
 ```
 
-- [ ] **Step 4: Implement GIF encoding from real frames only**
+- [ ] **Step 4: Implement GIF encoding from native frames only**
 
 Import Pillow only inside the function:
 
@@ -1021,8 +1012,7 @@ Import Pillow only inside the function:
 def write_preview(
     result: SimulationResult,
     output_dir: Path,
-    *,
-    sample_every: int = 2,
+    *, sample_every: int = 2,
     scale: int = 6,
 ) -> Path:
     from PIL import Image, ImageDraw
@@ -1045,7 +1035,6 @@ def write_preview(
 
     if not images:
         raise ValueError("cannot write preview with no frames")
-
     path = output_dir / "preview.gif"
     duration_ms = round(1000 * sample_every / result.fps)
     images[0].save(
@@ -1058,11 +1047,9 @@ def write_preview(
     return path
 ```
 
-Pillow only presents frames. It must never call Vess geometry functions or redraw eyes.
+Pillow only scales/labels/encodes real frames; it never draws Vess geometry.
 
-- [ ] **Step 5: Implement verification orchestration**
-
-`run_verification` runs all three scenarios:
+- [ ] **Step 5: Implement orchestration**
 
 ```python
 DEFAULT_SCENARIOS = (
@@ -1072,30 +1059,29 @@ DEFAULT_SCENARIOS = (
 )
 ```
 
-For each scenario:
+`run_verification` simulates every selected scenario, appends `check_invariants`, then runs `verify_determinism` for every selected scenario. Attach any determinism failure to its corresponding result.
+
+Artifact source:
 
 ```python
-result = simulate_scenario(name, fps=fps, seed=seed)
-result.failures.extend(check_invariants(result))
+artifact_result = next(
+    (r for r in results if r.scenario == "conversational_cycle"),
+    results[0],
+)
 ```
 
-Run determinism on `conversational_cycle` with the same seed/fps and include its failure in the primary result.
+Thus default `all` produces the conversational-cycle artifact; `--scenario priority_conflicts` still produces a useful trace/GIF for the explicitly selected scenario.
 
-Always write `summary.txt`, even on invariant failure, so CI artifacts explain the problem. Write `trace.json` for `conversational_cycle`. Write `preview.gif` for `conversational_cycle` unless `--no-gif`.
+Always write `summary.txt`. Write `trace.json` for `artifact_result`. Write GIF unless `--no-gif`.
 
-Return:
+Return code `1` if any result has failures, else `0`.
 
-```python
-code = 1 if any(result.failures for result in results) else 0
-return code, summary
-```
-
-Catch configuration/harness exceptions at the top of `run_verification`, create output directory, write:
+Catch top-level harness/config exceptions, create output directory, write:
 
 ```text
 Vess behavior verification
 
-HARNESS ERROR: <exception text>
+HARNESS ERROR: <exception>
 ```
 
 and return `(2, summary)`.
@@ -1105,7 +1091,11 @@ and return `(2, summary)`.
 ```python
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Render deterministic Vess behavior verification")
-    parser.add_argument("--scenario", choices=("all", "conversational_cycle", "priority_conflicts", "geometry_stress"), default="all")
+    parser.add_argument(
+        "--scenario",
+        choices=("all", "conversational_cycle", "priority_conflicts", "geometry_stress"),
+        default="all",
+    )
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--output", type=Path, default=ROOT / "artifacts" / "behavior-verification")
     parser.add_argument("--no-gif", action="store_true")
@@ -1114,9 +1104,9 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = _parse_args()
-    selected = DEFAULT_SCENARIOS if args.scenario == "all" else (args.scenario,)
+    scenarios = DEFAULT_SCENARIOS if args.scenario == "all" else (args.scenario,)
     code, summary = run_verification(
-        scenarios=selected,
+        scenarios=scenarios,
         seed=args.seed,
         fps=30,
         output=args.output,
@@ -1130,7 +1120,7 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-Do not expose animator physics/tuning flags.
+Do not expose animator tuning parameters.
 
 - [ ] **Step 7: Ignore generated artifacts**
 
@@ -1140,35 +1130,20 @@ Append to `.gitignore`:
 artifacts/behavior-verification/
 ```
 
-- [ ] **Step 8: Run focused tests and a local harness execution**
-
-Run:
+- [ ] **Step 8: Verify locally and commit**
 
 ```powershell
 python -m unittest tests.test_behavior_verification -v
 python tools/render_behavior_preview.py
-```
-
-Expected:
-
-```text
-exit code 0
-artifacts/behavior-verification/preview.gif exists
-artifacts/behavior-verification/trace.json exists
-artifacts/behavior-verification/summary.txt exists
-summary reports 3/3 scenarios PASS
-```
-
-- [ ] **Step 9: Commit Task 4**
-
-```powershell
 git add tools/render_behavior_preview.py tests/test_behavior_verification.py .gitignore
 git commit -m "feat: emit mobile behavior verification artifacts"
 ```
 
+Expected harness exit `0`, with `preview.gif`, `trace.json`, `summary.txt`.
+
 ---
 
-### Task 5: Lightweight CI Dependencies and GitHub Actions Publication
+### Task 5: Lightweight CI and Artifact Publication
 
 **Files:**
 - Create: `requirements-ci.txt`
@@ -1176,22 +1151,20 @@ git commit -m "feat: emit mobile behavior verification artifacts"
 - Modify: `tests/test_behavior_verification.py`
 
 **Interfaces:**
-- CI job `unit-tests` runs the repository suite.
-- CI job `behavior-preview` depends on `unit-tests` and uploads `vess-behavior-verification`.
-- No production interface changes.
+- CI `unit-tests` job runs full `unittest` discovery.
+- `behavior-preview` depends on `unit-tests`, publishes summary/artifacts even when behavioral invariants fail, then returns the original verification exit code.
 
-- [ ] **Step 1: Add a test proving the verification module imports without heavyweight runtime packages**
+- [ ] **Step 1: Add a no-heavy-runtime execution test**
 
-Add to `tests/test_behavior_verification.py`:
+The test must run an actual simulation, not merely import the module:
 
 ```python
-def test_verification_import_does_not_require_heavy_runtime_packages(self) -> None:
+def test_verification_simulation_does_not_import_heavy_runtime_packages(self) -> None:
     import subprocess
     import sys
 
     code = r'''
 import builtins
-
 blocked = {"kokoro", "faster_whisper", "ultralytics", "sounddevice", "ollama"}
 real_import = builtins.__import__
 
@@ -1202,28 +1175,28 @@ def guarded_import(name, *args, **kwargs):
     return real_import(name, *args, **kwargs)
 
 builtins.__import__ = guarded_import
-import tools.render_behavior_preview
+from tools.render_behavior_preview import simulate_scenario
+result = simulate_scenario("conversational_cycle", fps=30, seed=1)
+assert len(result.frames) == 360
 '''
     completed = subprocess.run(
         [sys.executable, "-c", code],
-        cwd=ROOT,
+        cwd=Path(__file__).resolve().parents[1],
         capture_output=True,
         text=True,
     )
     self.assertEqual(completed.returncode, 0, completed.stderr)
 ```
 
-Import `ROOT` from the runner or define the repo root in the test file with `Path(__file__).resolve().parents[1]`.
-
-- [ ] **Step 2: Run the new import test and verify current behavior**
+- [ ] **Step 2: Run that test before adding dependencies**
 
 ```powershell
-python -m unittest tests.test_behavior_verification.BehaviorVerificationTests.test_verification_import_does_not_require_heavy_runtime_packages -v
+python -m unittest tests.test_behavior_verification.BehaviorVerificationTests.test_verification_simulation_does_not_import_heavy_runtime_packages -v
 ```
 
-Expected: PASS if Tasks 1-4 respected dependency boundaries. If it fails, fix imports rather than adding blocked packages to CI.
+If it fails, fix the verification import graph. Do not solve it by installing blocked packages.
 
-- [ ] **Step 3: Create lightweight CI requirements**
+- [ ] **Step 3: Create lightweight unit-test requirements**
 
 Create `requirements-ci.txt` exactly:
 
@@ -1236,9 +1209,9 @@ httpx
 pillow
 ```
 
-Do not include `ultralytics`, `faster-whisper`, `sounddevice`, `kokoro`, or `ollama`.
+The current production modules import heavyweight model/audio libraries lazily. If the complete suite later proves one additional **lightweight** package is genuinely required, add that exact package; never replace this file with the runtime requirements wholesale.
 
-- [ ] **Step 4: Create the two-job GitHub Actions workflow**
+- [ ] **Step 4: Create GitHub Actions workflow**
 
 Create `.github/workflows/verify.yml`:
 
@@ -1261,6 +1234,7 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
+          cache-dependency-path: requirements-ci.txt
 
       - name: Install CI dependencies
         run: python -m pip install --upgrade pip && pip install -r requirements-ci.txt
@@ -1279,13 +1253,19 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
 
       - name: Install preview dependencies
         run: python -m pip install --upgrade pip && pip install numpy pillow
 
       - name: Run behavior verification
-        run: python tools/render_behavior_preview.py
+        id: behavior
+        shell: bash
+        run: |
+          set +e
+          python tools/render_behavior_preview.py
+          code=$?
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          exit 0
 
       - name: Publish verification summary
         if: always()
@@ -1304,50 +1284,25 @@ jobs:
           name: vess-behavior-verification
           path: artifacts/behavior-verification/
           if-no-files-found: error
-```
 
-Important ordering: the preview command may return nonzero, but the summary/artifact steps still need to run. GitHub normally stops later steps after a failed step, so change the preview step to capture and re-emit its exit code only after publication:
-
-```yaml
-      - name: Run behavior verification
-        id: behavior
-        shell: bash
-        run: |
-          set +e
-          python tools/render_behavior_preview.py
-          code=$?
-          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
-          exit 0
-```
-
-Then after summary + upload add:
-
-```yaml
       - name: Fail job if verification failed
         if: always()
         shell: bash
         run: exit "${{ steps.behavior.outputs.exit_code }}"
 ```
 
-Use this final form in the committed workflow so failed verification still leaves inspectable mobile artifacts.
+This deliberately preserves artifacts on invariant failure before failing the job.
 
-- [ ] **Step 5: Run the complete repository suite locally**
+- [ ] **Step 5: Run full local verification**
 
 ```powershell
 python -m unittest discover -s tests -v
-```
-
-Expected: `0 failures`, `0 errors`.
-
-- [ ] **Step 6: Run the behavior harness one final time**
-
-```powershell
 python tools/render_behavior_preview.py
 ```
 
-Expected exit `0` and all three primary artifacts.
+Expected: 0 test failures/errors and harness exit 0.
 
-- [ ] **Step 7: Commit Task 5**
+- [ ] **Step 6: Commit**
 
 ```powershell
 git add requirements-ci.txt .github/workflows/verify.yml tests/test_behavior_verification.py
@@ -1358,23 +1313,22 @@ git commit -m "ci: add remote Vess behavior verification"
 
 ## Final Verification Checklist
 
-Before marking this implementation ready for review:
-
-- [ ] `python -m unittest discover -s tests -v` reports 0 failures/errors.
+- [ ] Full unit suite reports 0 failures/errors.
 - [ ] `python tools/render_behavior_preview.py` exits 0.
-- [ ] `preview.gif`, `trace.json`, and `summary.txt` are produced under `artifacts/behavior-verification/`.
-- [ ] The GIF uses exact `FaceAnimator.tick` frames and does not redraw eyes independently.
-- [ ] `trace.json` schema version is 1 and contains all 30 FPS primary-scenario frames.
-- [ ] Traced gaze/offset values are the exact values passed to `face.render`, including drift/bob.
-- [ ] Per-eye offset fields exist and are `0.0` until whole-eye translation is implemented.
-- [ ] Same scenario + seed produces identical trace and frame hashes.
-- [ ] Global, listening, thinking, speaking, performance, and geometry hard invariants execute.
-- [ ] Any failure names scenario, phase/frame/time, invariant, and measured values.
-- [ ] Summary metrics come from trace data and do not use example constants.
-- [ ] The behavior harness imports no Kokoro, Whisper, YOLO, sounddevice, or Ollama package.
+- [ ] `preview.gif`, `trace.json`, `summary.txt` exist in `artifacts/behavior-verification/`.
+- [ ] GIF pixels originate from exact `FaceAnimator.tick` frames, not a duplicate renderer.
+- [ ] Trace schema version is 1 and default primary trace contains all 360 native 30-FPS frames.
+- [ ] Trace gaze/offset equal exact render-time gaze/offset including drift/bob.
+- [ ] Left/right eye-offset fields exist and remain `0.0` until whole-eye movement arrives.
+- [ ] Same scenario + seed has identical trace and frame hashes.
+- [ ] Priority invariant proves `listening > thinking > speaking > tracking > idle`.
+- [ ] Listening, thinking, speaking, performance, finite-value, frame-format, and composed-geometry invariants run automatically.
+- [ ] Every failure identifies scenario, phase, frame/time, invariant, and measured values.
+- [ ] Summary numbers are trace-derived; missing metrics show `n/a`, not invented constants.
+- [ ] Verification simulation imports no Kokoro, Whisper, YOLO, sounddevice, or Ollama package.
 - [ ] `requirements-ci.txt` remains lightweight.
 - [ ] GitHub Actions has `unit-tests` and dependent `behavior-preview` jobs.
-- [ ] A failed behavior run still publishes `summary.txt` and artifacts before the job fails.
-- [ ] Uploaded artifact name is exactly `vess-behavior-verification`.
-- [ ] No real camera/audio/conversation/database/private machine data is uploaded.
+- [ ] Failed behavior verification still uploads summary/artifacts before returning failure.
+- [ ] Artifact name is exactly `vess-behavior-verification`.
+- [ ] No real camera/audio/conversation/database/private-machine data enters CI artifacts.
 - [ ] Final target-PC acceptance remains required for hardware, latency, and subjective visual quality.
