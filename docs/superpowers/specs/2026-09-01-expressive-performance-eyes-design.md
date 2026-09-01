@@ -60,7 +60,7 @@ The first fixed expression set is:
 - `sympathetic`
 - `uncertain`
 
-The model chooses only the expression label. It does **not** invent numeric intensity, speed, pitch, or animation parameters. Each allowed expression maps to a fixed default intensity and fixed visual modifiers in code/config. This preserves the closed-list design principle and gives us one place to tune behavior.
+The model chooses only the expression label. It does **not** invent numeric intensity, speed, pitch, or animation parameters. Each allowed expression has a human-authored `performance.json` entry containing its fixed default intensity and visual modifiers. This preserves the closed-list design principle and gives us one place to tune behavior.
 
 Unknown or missing labels resolve to a neutral performance overlay. The underlying mood still remains visible.
 
@@ -137,7 +137,7 @@ A stale clause that is skipped before playback must never modify `State.performa
 
 The currently playing clause may continue after a newer generation is requested because barge-in is still out of scope. Its performance cue remains active until that physical playback ends, matching what the user is actually hearing.
 
-Performance is cleared in a `finally` path after playback so audio/device errors cannot leave the face stuck in an expression.
+Performance is cleared in a `finally` path after playback so audio/device errors cannot leave the state stuck in an expression.
 
 ## Eye behavior architecture
 
@@ -224,13 +224,13 @@ These are modifiers, not full alternate faces. Mood color remains unchanged by p
 
 Mood continues using the existing mood easing path. Performance overlays use a faster independent easing time constant so a clause-level expression appears quickly without snapping.
 
-When the cue changes between adjacent clauses, interpolate from the current overlay to the next instead of resetting through neutral. When speech ends, ease back to the neutral overlay.
+`State.performance` returns to neutral when physical playback of a clause ends, but the animator's interpolated overlay is never hard-reset. It simply retargets from whatever values are currently on screen. With the normal near-zero inter-clause playback gap, the next clause's cue arrives before a neutral target can have a meaningful visible effect, so the face transitions directly from one expression toward the next. If there is a real audible gap, the face naturally begins relaxing toward neutral during that gap.
 
 All performance values are clamped before use so a bad config value cannot make the eyes vanish, leave the panel, or vibrate.
 
 ## Configuration
 
-Add a small `performance.json` containing the fixed expression names and visual modifier values.
+Add a small `performance.json` containing the fixed expression names, fixed default intensity for each expression, and visual modifier values.
 
 The file is human-authored configuration. The model never writes it.
 
