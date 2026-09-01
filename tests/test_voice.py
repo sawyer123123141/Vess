@@ -35,6 +35,10 @@ class VoiceOutputTests(unittest.TestCase):
 
         self.assertEqual(played, [3, 4])
         self.assertFalse(state.speaking)
+        self.assertEqual(
+            [event["event"] for event in state.debug_snapshot()["events"]],
+            ["tts_started", "tts_complete", "tts_started", "tts_complete"],
+        )
 
 
 class RecordingLog:

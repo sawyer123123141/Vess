@@ -7,6 +7,7 @@ There are no other shared globals.
 from __future__ import annotations
 
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Iterator
@@ -38,6 +39,10 @@ class State:
     muted_until: float = 0.0
     last_spoke: float = 0.0
 
+    # Local-only operator diagnostics. These are not Vess memory.
+    debug_values: dict[str, object] = field(default_factory=dict, repr=False)
+    debug_events: list[dict[str, object]] = field(default_factory=list, repr=False)
+
     def __post_init__(self) -> None:
         # Reentrant because a producer holding the lock may call a helper that
         # takes it again. Assigned here rather than declared as a field so it
@@ -60,3 +65,29 @@ class State:
             self.mood = "neutral"
             self.mood_until = 0.0
             return previous_mood, previous_until
+
+    def update_debug(self, **values: object) -> None:
+        """Replace live diagnostic values without retaining a history entry."""
+        with self.locked():
+            self.debug_values.update(values)
+
+    def record_debug(self, event_type: str, **payload: object) -> None:
+        """Keep a small in-memory operator event history."""
+        with self.locked():
+            self.debug_events.append(
+                {"timestamp": time.time(), "event": event_type, **payload}
+            )
+            del self.debug_events[:-20]
+
+    def debug_snapshot(self) -> dict[str, object]:
+        """Return a lock-consistent browser diagnostics snapshot."""
+        with self.locked():
+            return {
+                "runtime": {
+                    "listening": self.listening,
+                    "thinking": self.thinking,
+                    "speaking": self.speaking,
+                },
+                "values": dict(self.debug_values),
+                "events": [dict(event) for event in self.debug_events],
+            }

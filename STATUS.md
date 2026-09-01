@@ -2,6 +2,23 @@
 
 Update this at the end of every session. Newest at the top.
 
+## Voice diagnostics console added
+
+The browser preview now includes a compact Diagnostics panel, refreshed every
+0.5 seconds from `GET /debug`. It reports mic peak, VAD activity/buffered
+duration, whether audio is being ignored during speech, and the existing
+listening/thinking/speaking flags. It retains the latest 20 local-only worker
+events: transcript and wake decision, Ollama request/first clause/completion,
+Kokoro preparation/playback, and errors. This is an in-memory operator aid;
+it does not query or extend the Step 5 memory database.
+
+Live check: the console showed microphone input and Whisper transcribed
+`Can you, can you help me and give me something, brother?`; it was correctly
+recorded as a rejected wake because it did not begin with a configured
+variant. Current idle mic peaks were about **0.008**, below the configured
+VAD threshold of **0.015**, so quiet speech may need a lower threshold after
+testing a deliberate “Hey Vess” request.
+
 ## Step 4 done — local threaded voice loop and append-only event history
 
 Vess now runs the local path `microphone -> energy VAD -> CPU Whisper ->

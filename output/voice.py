@@ -79,22 +79,29 @@ class VoiceOutput:
     def _prepare(self, text: str) -> None:
         try:
             self._acknowledgement_audio = self._synthesize_text(text)
+            self._state.record_debug("tts_prepared", text=text)
         except Exception as error:
             self._event_log.append("voice_error", {"error": str(error)})
+            self._state.record_debug("tts_error", error=str(error), text=text)
 
     def _speak_acknowledgement(self) -> None:
         if self._acknowledgement_audio is None:
             self._prepare(self._acknowledgement)
         if self._acknowledgement_audio is not None:
+            self._state.record_debug("tts_started", text=self._acknowledgement)
             self._play_waveform(self._acknowledgement_audio)
+            self._state.record_debug("tts_complete", text=self._acknowledgement)
 
     def _speak(self, text: str) -> None:
+        self._state.record_debug("tts_started", text=text)
         try:
             audio = self._synthesize_text(text)
         except Exception as error:
             self._event_log.append("voice_error", {"error": str(error), "text": text})
+            self._state.record_debug("tts_error", error=str(error), text=text)
             return
         self._play_waveform(audio)
+        self._state.record_debug("tts_complete", text=text)
 
     def _play_waveform(self, audio: np.ndarray) -> None:
         with self._state.locked():
@@ -105,6 +112,7 @@ class VoiceOutput:
                 self._play(audio, sample_rate)
         except Exception as error:
             self._event_log.append("voice_error", {"error": str(error)})
+            self._state.record_debug("tts_error", error=str(error))
         finally:
             with self._state.locked():
                 self._state.speaking = False

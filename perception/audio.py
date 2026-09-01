@@ -29,6 +29,7 @@ class UtteranceAssembler:
         silence_seconds: float,
         max_utterance_seconds: float,
     ) -> None:
+        self._sample_rate = sample_rate
         self._threshold = threshold
         self._min_samples = ceil(sample_rate * min_utterance_seconds)
         self._silence_samples = ceil(sample_rate * silence_seconds)
@@ -58,6 +59,13 @@ class UtteranceAssembler:
             if self._trailing_quiet >= self._silence_samples:
                 return self._finish()
         return None
+
+    def status(self) -> dict[str, object]:
+        """Expose current VAD assembly without exposing its sample buffer."""
+        return {
+            "vad_active": bool(self._samples),
+            "vad_seconds": len(self._samples) / self._sample_rate,
+        }
 
     def _finish(self) -> np.ndarray | None:
         final_index = len(self._samples) - self._trailing_quiet
@@ -110,11 +118,13 @@ class AudioLoop:
             transcript = self._transcribe(samples).strip()
         except Exception as error:
             self._event_log.append("audio_error", {"error": str(error)})
+            self._state.record_debug("audio_error", error=str(error))
             return
         finally:
             with self._state.locked():
                 self._state.listening = False
 
+        self._state.record_debug("transcript", transcript=transcript)
         closest = match_wake_phrase(transcript, self._variants, 1_000_000)
         accepted = (
             closest if closest is not None and closest.distance <= self._max_distance else None
@@ -122,9 +132,11 @@ class AudioLoop:
         payload = _wake_payload(transcript, closest)
         if accepted is None:
             self._event_log.append("wake_rejected", payload)
+            self._state.record_debug("wake_rejected", **payload)
             return
 
         self._event_log.append("wake_accepted", payload)
+        self._state.record_debug("wake_accepted", **payload)
         request = " ".join(transcript.split()[accepted.consumed_words:])
         self._on_request(request)
 
@@ -184,6 +196,7 @@ class AudioLoop:
                 self._transcribe = _make_transcriber(self._config)
             except Exception as error:
                 self._event_log.append("audio_error", {"error": str(error)})
+                self._state.record_debug("audio_error", error=str(error))
                 return
         while not self._stop.is_set():
             block = self._blocks.get()
@@ -192,8 +205,15 @@ class AudioLoop:
             with self._state.locked():
                 speaking = self._state.speaking
             if speaking:
+                self._state.update_debug(audio_ignored=True)
                 continue
             utterance = self._assembler.push(block)
+            peak = float(np.max(np.abs(block))) if block.size else 0.0
+            self._state.update_debug(
+                audio_ignored=False,
+                mic_peak=round(peak, 4),
+                **self._assembler.status(),
+            )
             if utterance is not None:
                 self.handle_utterance(utterance)
 

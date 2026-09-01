@@ -182,20 +182,28 @@ class ConversationWorker:
 
     def _respond(self, user_request: str) -> None:
         if not user_request:
+            self._state.record_debug("acknowledgement")
             self._voice.enqueue_acknowledgement()
             return
 
         with self._state.locked():
             self._state.thinking = True
+        self._state.record_debug("llm_started", request=user_request)
         try:
             prompt = build_prompt(self._config, self._state, user_request)
+            first_clause = True
             for clause in split_clauses(self._client.stream(prompt, self._config)):
                 with self._state.locked():
                     self._state.thinking = False
+                if first_clause:
+                    self._state.record_debug("llm_first_clause", clause=clause)
+                    first_clause = False
                 self._voice.enqueue(clause)
+            self._state.record_debug("llm_complete")
             self._update_mood(user_request)
         except Exception as error:
             self._event_log.append("conversation_error", {"error": str(error)})
+            self._state.record_debug("conversation_error", error=str(error))
         finally:
             with self._state.locked():
                 self._state.thinking = False
@@ -214,6 +222,9 @@ class ConversationWorker:
             )
         self._event_log.append(
             "mood_changed", {"from": previous_mood, "to": mood}
+        )
+        self._state.record_debug(
+            "mood_changed", previous_mood=previous_mood, mood=mood
         )
 
 

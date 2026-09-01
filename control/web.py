@@ -26,6 +26,8 @@ _INDEX = """<!doctype html>
     img { background: #000; image-rendering: pixelated; width: 512px; height: 512px; }
     section { margin-top: 1.5rem; }
     button, input { font: inherit; margin: 0 .3rem; }
+    #debug { background: #181a1f; border: 1px solid #343842; margin: 0.6rem auto;
+             max-width: 512px; padding: 0.8rem; text-align: left; white-space: pre-wrap; }
   </style>
 </head>
 <body>
@@ -34,9 +36,14 @@ _INDEX = """<!doctype html>
     <label>Colour <input id="color" type="color" value="#64b4ff"></label>
     <button id="reset" type="button">Use mood colour</button>
   </section>
+  <section>
+    <h2>Diagnostics</h2>
+    <pre id="debug">Connecting…</pre>
+  </section>
   <script>
     const preview = document.querySelector('#preview');
     const color = document.querySelector('#color');
+    const debug = document.querySelector('#debug');
     let previewUrl = '';
 
     async function poll() {
@@ -54,6 +61,27 @@ _INDEX = """<!doctype html>
       }
     }
 
+    async function pollDebug() {
+      try {
+        const response = await fetch('/debug', { cache: 'no-store' });
+        if (response.ok) debug.textContent = formatDebug(await response.json());
+      } finally {
+        setTimeout(pollDebug, 500);
+      }
+    }
+
+    function formatDebug(snapshot) {
+      const runtime = Object.entries(snapshot.runtime)
+          .map(([name, value]) => `${name}: ${value}`).join('  ');
+      const values = Object.entries(snapshot.values)
+          .map(([name, value]) => `${name}: ${value}`).join('\n');
+      const events = snapshot.events.slice(-8).reverse().map(event => {
+        const { timestamp, event: name, ...details } = event;
+        return `${new Date(timestamp * 1000).toLocaleTimeString()}  ${name} ${JSON.stringify(details)}`;
+      }).join('\n');
+      return [runtime, values, events].filter(Boolean).join('\n\n');
+    }
+
     color.addEventListener('change', async () => {
       const hex = color.value.slice(1);
       const channels = [0, 2, 4].map(i => parseInt(hex.slice(i, i + 2), 16));
@@ -64,6 +92,7 @@ _INDEX = """<!doctype html>
       await fetch('/color', { method: 'DELETE' });
     });
     poll();
+    pollDebug();
   </script>
 </body>
 </html>
@@ -137,6 +166,10 @@ def create_app(
         if encoded is None:
             raise HTTPException(status_code=503, detail="preview not ready")
         return Response(encoded, media_type="image/png")
+
+    @app.get("/debug")
+    def debug() -> dict[str, object]:
+        return state.debug_snapshot()
 
     @app.put("/color")
     def set_color(request: ColorRequest) -> dict[str, list[int]]:

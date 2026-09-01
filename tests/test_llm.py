@@ -68,6 +68,10 @@ class LlmTests(unittest.TestCase):
             log.events,
             [("mood_changed", {"from": "neutral", "to": "annoyed"})],
         )
+        self.assertEqual(
+            [event["event"] for event in state.debug_snapshot()["events"]],
+            ["llm_started", "llm_first_clause", "llm_complete", "mood_changed"],
+        )
 
 
 class FakeResponse:

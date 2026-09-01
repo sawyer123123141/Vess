@@ -76,6 +76,33 @@ class WebPreviewTests(unittest.TestCase):
             ],
         )
 
+    def test_debug_endpoint_reports_runtime_state_and_recent_events(self) -> None:
+        web = _web_module()
+        state = State(listening=True, thinking=True)
+        app = web.create_app(state, web.WebPreview())
+
+        with TestClient(app) as client:
+            response = client.get("/debug")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["runtime"],
+            {"listening": True, "thinking": True, "speaking": False},
+        )
+        self.assertEqual(response.json()["events"], [])
+
+    def test_debug_endpoint_retains_recent_worker_event(self) -> None:
+        web = _web_module()
+        state = State()
+        state.record_debug("wake_rejected", transcript="hey guest")
+        app = web.create_app(state, web.WebPreview())
+
+        with TestClient(app) as client:
+            response = client.get("/debug")
+
+        self.assertEqual(response.json()["events"][0]["event"], "wake_rejected")
+        self.assertEqual(response.json()["events"][0]["transcript"], "hey guest")
+
     def test_homepage_polls_lossless_preview_at_30fps_with_color_controls(self) -> None:
         web = _web_module()
         app = web.create_app(State(), web.WebPreview())
@@ -88,6 +115,8 @@ class WebPreviewTests(unittest.TestCase):
         self.assertIn("1000 / 30", response.text)
         self.assertIn('id="color"', response.text)
         self.assertIn('id="reset"', response.text)
+        self.assertIn('id="debug"', response.text)
+        self.assertIn("/debug", response.text)
 
     def test_server_serves_preview_from_its_own_thread(self) -> None:
         web = _web_module()
