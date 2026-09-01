@@ -30,6 +30,8 @@ class ChatterboxTurboEngine:
                 ) from error
 
             self._model = ChatterboxTurboTTS.from_pretrained(device=self._device)
+            if self._reference_audio:
+                self._model.prepare_conditionals(self._reference_audio)
         return self._model
 
     def synthesize(
@@ -38,11 +40,7 @@ class ChatterboxTurboEngine:
         performance: PerformanceCue,
     ) -> SynthesisResult:
         model = self._get_model()
-        kwargs: dict[str, object] = {}
-        if self._reference_audio:
-            kwargs["audio_prompt_path"] = self._reference_audio
-
-        waveform = model.generate(text, **kwargs)
+        waveform = model.generate(text)
         if hasattr(waveform, "detach"):
             waveform = waveform.detach().cpu().numpy()
         audio = np.asarray(waveform, dtype=np.float32).reshape(-1)
