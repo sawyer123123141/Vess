@@ -1,5 +1,7 @@
 """Deterministic audio gate behavior."""
 
+import threading
+import time
 import unittest
 
 import numpy as np
@@ -102,6 +104,52 @@ class AudioLoopTests(unittest.TestCase):
             [event["event"] for event in state.debug_snapshot()["events"]],
             ["transcript", "wake_accepted"],
         )
+
+    def test_capture_keeps_draining_blocks_while_transcription_runs(self) -> None:
+        transcribe_started = threading.Event()
+        release_transcribe = threading.Event()
+
+        def slow_transcribe(_: np.ndarray) -> str:
+            transcribe_started.set()
+            release_transcribe.wait(timeout=1.0)
+            return "hey vess hello"
+
+        config = {
+            "audio": {
+                "sample_rate": 10,
+                "vad_threshold": 0.1,
+                "min_utterance_seconds": 0.1,
+                "silence_seconds": 0.1,
+                "max_utterance_seconds": 2.0,
+                "wake_variants": ["hey vess"],
+                "wake_max_distance": 2,
+            }
+        }
+        loop = AudioLoop(
+            config,
+            State(),
+            RecordingLog(),
+            lambda _: None,
+            transcribe=slow_transcribe,
+        )
+        worker = threading.Thread(target=loop._run, daemon=True)
+        worker.start()
+        loop._blocks.put(np.array([0.2, 0.0]))
+        self.assertTrue(transcribe_started.wait(timeout=0.5))
+
+        for _ in range(20):
+            loop._on_audio(np.zeros((1, 1), dtype=np.float32))
+        time.sleep(0.05)
+
+        self.assertLess(loop._blocks.qsize(), 16)
+
+        loop._stop.set()
+        release_transcribe.set()
+        try:
+            loop._blocks.put_nowait(None)
+        except __import__("queue").Full:
+            pass
+        worker.join(timeout=1.0)
 
 
 class RecordingLog:
