@@ -1,5 +1,6 @@
 """Serialized speech-output behavior."""
 
+import time
 import unittest
 
 import numpy as np
@@ -28,6 +29,7 @@ class VoiceOutputTests(unittest.TestCase):
             play=lambda audio, _: played.append(int(audio[0])),
         )
 
+        started = time.time()
         voice.start()
         voice.enqueue("one")
         voice.enqueue("four")
@@ -35,9 +37,17 @@ class VoiceOutputTests(unittest.TestCase):
 
         self.assertEqual(played, [3, 4])
         self.assertFalse(state.speaking)
+        self.assertGreaterEqual(state.last_spoke, started)
         self.assertEqual(
             [event["event"] for event in state.debug_snapshot()["events"]],
-            ["tts_started", "tts_complete", "tts_started", "tts_complete"],
+            [
+                "tts_started",
+                "tts_playback_started",
+                "tts_complete",
+                "tts_started",
+                "tts_playback_started",
+                "tts_complete",
+            ],
         )
 
 
