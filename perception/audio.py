@@ -131,8 +131,6 @@ class AudioLoop:
 
     def handle_utterance(self, samples: np.ndarray) -> None:
         """Transcribe one utterance and either log rejection or dispatch it."""
-        with self._state.locked():
-            self._state.listening = True
         try:
             if self._transcribe is None:
                 raise RuntimeError("audio loop was not started")
@@ -141,9 +139,6 @@ class AudioLoop:
             self._event_log.append("audio_error", {"error": str(error)})
             self._state.record_debug("audio_error", error=str(error))
             return
-        finally:
-            with self._state.locked():
-                self._state.listening = False
 
         self._state.record_debug("transcript", transcript=transcript)
         closest = match_wake_phrase(transcript, self._variants, 1_000_000)
@@ -224,15 +219,21 @@ class AudioLoop:
                 with self._state.locked():
                     speaking = self._state.speaking
                 if speaking:
+                    with self._state.locked():
+                        self._state.listening = False
                     self._state.update_debug(audio_ignored=True)
                     continue
+
                 utterance = self._assembler.push(block)
+                status = self._assembler.status()
+                with self._state.locked():
+                    self._state.listening = bool(status["vad_active"])
                 peak = float(np.max(np.abs(block))) if block.size else 0.0
                 self._state.update_debug(
                     audio_ignored=False,
                     mic_peak=round(peak, 4),
                     transcription_queue=self._utterances.qsize(),
-                    **self._assembler.status(),
+                    **status,
                 )
                 if utterance is not None:
                     if self._transcriber_failed.is_set():
@@ -242,6 +243,8 @@ class AudioLoop:
                     else:
                         self._utterances.put(utterance)
         finally:
+            with self._state.locked():
+                self._state.listening = False
             self._utterances.put(None)
 
     def _ensure_transcribe_thread(self) -> None:
