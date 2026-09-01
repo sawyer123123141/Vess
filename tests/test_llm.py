@@ -152,6 +152,39 @@ class LlmTests(unittest.TestCase):
             self.assertIn(f"[[vess:{label}]]", prompt)
         self.assertIn("Response format:", prompt)
 
+    def test_prompt_marks_interrupted_history_without_treating_partial_clause_as_heard(self) -> None:
+        config = {
+            "personas": {"friendly": "Warm and casual."},
+            "memory": {"short_term_minutes": 10, "short_term_turns": 8},
+        }
+        state = State()
+        append_conversation_turn(
+            state,
+            "Explain rainbows",
+            "Light enters the droplet.",
+            timestamp=time.time(),
+            max_age_seconds=600.0,
+            max_turns=8,
+            status="interrupted",
+            interrupted_clause="Then it bends and separates into colors.",
+        )
+
+        prompt = build_prompt(
+            config,
+            {"neutral": {"prompt": ""}},
+            state,
+            "Continue",
+            performances=PERFORMANCES,
+        )
+
+        self.assertIn("User: Explain rainbows", prompt)
+        self.assertIn("Vess (interrupted): Light enters the droplet.", prompt)
+        self.assertIn(
+            "Vess had started another clause but was interrupted; do not assume the user heard all of it.",
+            prompt,
+        )
+        self.assertNotIn("Then it bends and separates into colors.", prompt)
+
     def test_prompt_omits_expired_history(self) -> None:
         config = {
             "personas": {"friendly": "Warm and casual."},
@@ -196,6 +229,47 @@ class LlmTests(unittest.TestCase):
             "num_predict": 80,
         })
 
+    def test_generated_text_is_not_memory_until_physical_delivery_receipts_arrive(self) -> None:
+        state = State()
+        voice = RecordingVoice()
+        log = RecordingLog()
+        worker = ConversationWorker(
+            {
+                "personas": {"friendly": "Warm."},
+                "memory": {"short_term_minutes": 10, "short_term_turns": 8},
+            },
+            {"neutral": {}},
+            state,
+            log,
+            FakeClient(),
+            voice,
+            performances=PERFORMANCES,
+        )
+
+        worker.start()
+        worker.submit("Tell me something")
+        worker.close()
+
+        self.assertEqual(state.conversation_turns, [])
+        generation_id, text = voice.generated[0]
+        worker.handle_delivery(
+            "clause_started",
+            {"generation_id": generation_id, "text": text},
+        )
+        worker.handle_delivery(
+            "clause_completed",
+            {"generation_id": generation_id, "text": text},
+        )
+        worker.handle_delivery(
+            "generation_playback_drained",
+            {"generation_id": generation_id},
+        )
+
+        self.assertEqual(
+            [(turn.user, turn.assistant) for turn in state.conversation_turns],
+            [("Tell me something", "First, then second.")],
+        )
+
     def test_conversation_streams_clean_clauses_remembers_turn_and_logs_valid_mood_change(self) -> None:
         state = State()
         voice = RecordingVoice()
@@ -209,6 +283,7 @@ class LlmTests(unittest.TestCase):
             voice,
             performances=PERFORMANCES,
         )
+        voice.delivery_callback = worker.handle_delivery
 
         worker.start()
         worker.submit("Tell me something")
@@ -269,9 +344,12 @@ class FakeClient:
 class RecordingVoice:
     def __init__(self) -> None:
         self.clauses: list[tuple[str, str]] = []
+        self.generated: list[tuple[int, str]] = []
+        self.finished_generations: list[int] = []
+        self.delivery_callback = None
 
     def begin_generation(self, generation_id: int) -> None:
-        pass
+        return None
 
     def enqueue(
         self,
@@ -281,6 +359,25 @@ class RecordingVoice:
     ) -> None:
         cue = performance or PerformanceCue()
         self.clauses.append((text, cue.expression))
+        if generation_id is not None:
+            self.generated.append((generation_id, text))
+            if self.delivery_callback is not None:
+                self.delivery_callback(
+                    "clause_started",
+                    {"generation_id": generation_id, "text": text},
+                )
+                self.delivery_callback(
+                    "clause_completed",
+                    {"generation_id": generation_id, "text": text},
+                )
+
+    def finish_generation(self, generation_id: int) -> None:
+        self.finished_generations.append(generation_id)
+        if self.delivery_callback is not None:
+            self.delivery_callback(
+                "generation_playback_drained",
+                {"generation_id": generation_id},
+            )
 
     def enqueue_acknowledgement(self, generation_id: int | None = None) -> None:
         self.clauses.append(("Yeah?", "neutral"))
