@@ -19,6 +19,12 @@ variant. Current idle mic peaks were about **0.008**, below the configured
 VAD threshold of **0.015**, so quiet speech may need a lower threshold after
 testing a deliberate “Hey Vess” request.
 
+Follow-up: the first console build emitted literal newlines into JavaScript
+string literals, which stopped both browser polling loops. The page now emits
+escaped `\\n` separators; a regression test checks the served source. After
+restart/reload, the in-app browser showed a live face `blob:` URL and populated
+diagnostics with no new console error.
+
 ## Step 4 done — local threaded voice loop and append-only event history
 
 Vess now runs the local path `microphone -> energy VAD -> CPU Whisper ->

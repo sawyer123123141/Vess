@@ -117,6 +117,7 @@ class WebPreviewTests(unittest.TestCase):
         self.assertIn('id="reset"', response.text)
         self.assertIn('id="debug"', response.text)
         self.assertIn("/debug", response.text)
+        self.assertIn(r"join('\n')", response.text)
 
     def test_server_serves_preview_from_its_own_thread(self) -> None:
         web = _web_module()

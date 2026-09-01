@@ -74,12 +74,12 @@ _INDEX = """<!doctype html>
       const runtime = Object.entries(snapshot.runtime)
           .map(([name, value]) => `${name}: ${value}`).join('  ');
       const values = Object.entries(snapshot.values)
-          .map(([name, value]) => `${name}: ${value}`).join('\n');
+          .map(([name, value]) => `${name}: ${value}`).join('\\n');
       const events = snapshot.events.slice(-8).reverse().map(event => {
         const { timestamp, event: name, ...details } = event;
         return `${new Date(timestamp * 1000).toLocaleTimeString()}  ${name} ${JSON.stringify(details)}`;
-      }).join('\n');
-      return [runtime, values, events].filter(Boolean).join('\n\n');
+      }).join('\\n');
+      return [runtime, values, events].filter(Boolean).join('\\n\\n');
     }
 
     color.addEventListener('change', async () => {
