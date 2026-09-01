@@ -23,3 +23,5 @@ Thumbs.db
 
 local_config.json
 .env
+
+artifacts/behavior-verification/
