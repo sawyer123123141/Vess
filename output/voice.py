@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import queue
 import threading
 import time
@@ -10,8 +11,22 @@ from typing import Any
 
 import numpy as np
 
+from output.audio_player import (
+    AudioPlayer,
+    CallbackAudioPlayer,
+    PlaybackReceipt,
+    SoundDeviceAudioPlayer,
+)
 from output.tts.base import SynthesisResult, TTSEngine
 from performance import PerformanceCue
+
+
+@dataclass(frozen=True)
+class _PlaybackContext:
+    kind: str
+    text: str
+    generation_id: int | None
+    performance: PerformanceCue | None
 
 
 class VoiceOutput:
@@ -25,13 +40,21 @@ class VoiceOutput:
         synthesize: Callable[[str], np.ndarray] | None = None,
         play: Callable[[np.ndarray, int], None] | None = None,
         engine: TTSEngine | None = None,
+        player: AudioPlayer | None = None,
+        on_delivery: Callable[[str, dict[str, object]], None] | None = None,
     ) -> None:
         self._config = config
         self._state = state
         self._event_log = event_log
         self._legacy_synthesize = synthesize
         self._engine = engine
-        self._play = play or _play_audio
+        if player is not None:
+            self._player = player
+        elif play is not None:
+            self._player = CallbackAudioPlayer(play)
+        else:
+            self._player = SoundDeviceAudioPlayer()
+        self._on_delivery = on_delivery
 
         self._queue: queue.Queue[
             tuple[str, str | None, int | None, PerformanceCue] | None
@@ -55,6 +78,11 @@ class VoiceOutput:
         self._active_generation = 0
         self._thread: threading.Thread | None = None
         self._playback_thread: threading.Thread | None = None
+
+        self._interruption_condition = threading.Condition()
+        self._current_playback: _PlaybackContext | None = None
+        self._paused_playback: _PlaybackContext | None = None
+        self._interruption_decision: str | None = None
 
         self._acknowledgement = "Yeah?"
         self._acknowledgement_audio: np.ndarray | None = None
@@ -106,6 +134,83 @@ class VoiceOutput:
         self._queue.put(("acknowledgement", None, generation_id, PerformanceCue()))
         self._state.update_debug(tts_queue=self._queue.qsize())
 
+    def finish_generation(self, generation_id: int) -> None:
+        """Queue an ordered marker that fires after all preceding speech drains."""
+        self._queue.put(("finish", None, generation_id, PerformanceCue()))
+        self._state.update_debug(tts_queue=self._queue.qsize())
+
+    def pause_for_interruption(self) -> PlaybackReceipt | None:
+        """Pause the currently audible waveform without cancelling its generation."""
+        with self._interruption_condition:
+            context = self._current_playback
+        if context is None or context.kind != "speak":
+            return None
+
+        receipt = self._player.pause_for_interruption()
+        if (
+            receipt is None
+            or receipt.status != "paused"
+            or receipt.generation_id != context.generation_id
+        ):
+            return None
+
+        with self._interruption_condition:
+            if self._current_playback is not context:
+                return None
+            self._paused_playback = context
+            self._interruption_decision = None
+            self._interruption_condition.notify_all()
+
+        self._deactivate_playback_state(context)
+        self._mark_spoke_if_audible(receipt)
+        self._emit_delivery(
+            "clause_paused",
+            generation_id=context.generation_id,
+            text=context.text,
+            frames_completed=receipt.frames_completed,
+            total_frames=receipt.total_frames,
+        )
+        self._state.record_debug(
+            "tts_paused",
+            text=context.text,
+            generation_id=context.generation_id,
+            frames_completed=receipt.frames_completed,
+            total_frames=receipt.total_frames,
+        )
+        return receipt
+
+    def commit_interruption(self, generation_id: int) -> bool:
+        """Permanently abandon the paused remainder for exactly one generation."""
+        with self._interruption_condition:
+            context = self._paused_playback
+            if (
+                context is None
+                or context.generation_id != generation_id
+                or self._interruption_decision is not None
+            ):
+                return False
+            self._interruption_decision = "commit"
+            self._interruption_condition.notify_all()
+
+        self._player.discard_paused()
+        return True
+
+    def resume_after_false_interruption(self, generation_id: int) -> bool:
+        """Resume the same paused waveform only if its generation is still current."""
+        if self._is_stale(generation_id):
+            return False
+        with self._interruption_condition:
+            context = self._paused_playback
+            if (
+                context is None
+                or context.generation_id != generation_id
+                or self._interruption_decision is not None
+            ):
+                return False
+            self._interruption_decision = "resume"
+            self._interruption_condition.notify_all()
+        return True
+
     def close(self) -> None:
         """Finish queued synthesis and playback before stopping both workers."""
         if self._thread is None:
@@ -133,6 +238,8 @@ class VoiceOutput:
                 self._prepare(text or self._acknowledgement)
             elif kind == "acknowledgement":
                 self._speak_acknowledgement(generation_id)
+            elif kind == "finish":
+                self._queue_finish_marker(generation_id)
             else:
                 self._speak(
                     text or "",
@@ -164,10 +271,22 @@ class VoiceOutput:
                 self._record_stale_skip(generation_id, stage="prepared")
                 continue
 
+            if kind == "finish":
+                self._emit_delivery(
+                    "generation_playback_drained",
+                    generation_id=generation_id,
+                )
+                self._state.record_debug(
+                    "generation_playback_drained",
+                    generation_id=generation_id,
+                )
+                continue
+
             if kind == "acknowledgement":
                 self._state.record_debug("tts_started", text=text)
             self._play_waveform(
                 audio,
+                kind=kind,
                 sample_rate=sample_rate,
                 text=text,
                 synthesis_ms=synthesis_ms,
@@ -263,6 +382,24 @@ class VoiceOutput:
         )
         self._state.update_debug(tts_ready_queue=self._ready_queue.qsize())
 
+    def _queue_finish_marker(self, generation_id: int | None) -> None:
+        if not self._reserve_ready_slot(generation_id):
+            return
+        sample_rate = int(self._config.get("voice", {}).get("sample_rate", 24_000))
+        self._ready_queue.put(
+            (
+                "finish",
+                "",
+                np.asarray([], dtype=np.float32),
+                sample_rate,
+                generation_id,
+                None,
+                None,
+                None,
+            )
+        )
+        self._state.update_debug(tts_ready_queue=self._ready_queue.qsize())
+
     def _reserve_ready_slot(self, generation_id: int | None) -> bool:
         """Reserve the sole prepared-audio slot before doing synthesis work."""
         self._ready_slots.acquire()
@@ -276,6 +413,7 @@ class VoiceOutput:
         self,
         audio: np.ndarray,
         *,
+        kind: str,
         sample_rate: int,
         text: str,
         synthesis_ms: float | None = None,
@@ -287,90 +425,228 @@ class VoiceOutput:
             self._record_stale_skip(generation_id, stage="before_playback")
             return
 
-        played = False
-        performance_active = False
-        with self._state.locked():
-            self._state.speaking = True
+        context = _PlaybackContext(kind, text, generation_id, performance)
+        if not audio.size:
+            return
+
+        payload: dict[str, object] = {"text": text}
+        if synthesis_ms is not None:
+            rounded = round(synthesis_ms, 1)
+            payload["synthesis_ms"] = rounded
+            self._state.update_debug(tts_synthesis_ms=rounded)
+
+        leading_silence_ms, trailing_silence_ms = _waveform_edge_silence_ms(
+            audio,
+            sample_rate,
+        )
+        payload["leading_silence_ms"] = leading_silence_ms
+        payload["trailing_silence_ms"] = trailing_silence_ms
+        debug_values: dict[str, object] = {
+            "tts_leading_silence_ms": leading_silence_ms,
+            "tts_trailing_silence_ms": trailing_silence_ms,
+        }
+        if raw_edge_silence_ms is not None:
+            raw_leading_ms, raw_trailing_ms = raw_edge_silence_ms
+            payload["raw_leading_silence_ms"] = raw_leading_ms
+            payload["raw_trailing_silence_ms"] = raw_trailing_ms
+            debug_values["tts_raw_leading_silence_ms"] = raw_leading_ms
+            debug_values["tts_raw_trailing_silence_ms"] = raw_trailing_ms
+        self._state.update_debug(**debug_values)
+
+        playback_started_at = time.perf_counter()
+        if (
+            self._last_playback_ended_at is not None
+            and generation_id == self._last_playback_generation
+        ):
+            gap_ms = round(
+                (playback_started_at - self._last_playback_ended_at) * 1000.0,
+                1,
+            )
+            payload["gap_ms"] = gap_ms
+            self._state.update_debug(tts_gap_ms=gap_ms)
+
+        with self._interruption_condition:
+            self._current_playback = context
+            self._paused_playback = None
+            self._interruption_decision = None
+
+        self._activate_playback_state(context)
+        if kind == "speak":
+            self._emit_delivery(
+                "clause_started",
+                generation_id=generation_id,
+                text=text,
+            )
+        self._state.record_debug("tts_playback_started", **payload)
+
         try:
-            if audio.size:
-                payload: dict[str, object] = {"text": text}
-                if synthesis_ms is not None:
-                    rounded = round(synthesis_ms, 1)
-                    payload["synthesis_ms"] = rounded
-                    self._state.update_debug(tts_synthesis_ms=rounded)
-
-                leading_silence_ms, trailing_silence_ms = _waveform_edge_silence_ms(
-                    audio,
-                    sample_rate,
-                )
-                payload["leading_silence_ms"] = leading_silence_ms
-                payload["trailing_silence_ms"] = trailing_silence_ms
-                debug_values: dict[str, object] = {
-                    "tts_leading_silence_ms": leading_silence_ms,
-                    "tts_trailing_silence_ms": trailing_silence_ms,
-                }
-                if raw_edge_silence_ms is not None:
-                    raw_leading_ms, raw_trailing_ms = raw_edge_silence_ms
-                    payload["raw_leading_silence_ms"] = raw_leading_ms
-                    payload["raw_trailing_silence_ms"] = raw_trailing_ms
-                    debug_values["tts_raw_leading_silence_ms"] = raw_leading_ms
-                    debug_values["tts_raw_trailing_silence_ms"] = raw_trailing_ms
-                self._state.update_debug(**debug_values)
-
-                playback_started_at = time.perf_counter()
-                if (
-                    self._last_playback_ended_at is not None
-                    and generation_id == self._last_playback_generation
-                ):
-                    gap_ms = round(
-                        (playback_started_at - self._last_playback_ended_at) * 1000.0,
-                        1,
-                    )
-                    payload["gap_ms"] = gap_ms
-                    self._state.update_debug(tts_gap_ms=gap_ms)
-
-                if performance is not None:
-                    with self._state.locked():
-                        self._state.performance = performance
-                    self._state.update_debug(
-                        performance_expression=performance.expression,
-                        performance_intensity=performance.intensity,
-                    )
-                    self._state.record_debug(
-                        "performance_started",
-                        text=text,
-                        expression=performance.expression,
-                        intensity=performance.intensity,
-                        generation_id=generation_id,
-                    )
-                    performance_active = True
-
-                self._state.record_debug("tts_playback_started", **payload)
-                self._play(audio, sample_rate)
-                played = True
+            receipt = self._player.play(audio, sample_rate, generation_id)
         except Exception as error:
             self._event_log.append("voice_error", {"error": str(error)})
             self._state.record_debug("tts_error", error=str(error))
-        finally:
-            if performance_active and performance is not None:
-                with self._state.locked():
-                    self._state.performance = PerformanceCue()
-                self._state.update_debug(
-                    performance_expression="neutral",
-                    performance_intensity=0.0,
-                )
-                self._state.record_debug(
-                    "performance_ended",
-                    expression=performance.expression,
-                    generation_id=generation_id,
-                )
+            self._finish_playback_context(context, completed=False)
+            return
+
+        if receipt.status == "paused" and kind == "speak":
+            self._handle_paused_playback(context, receipt)
+            return
+
+        if receipt.status == "error":
+            error = "audio player failed during playback"
+            self._event_log.append("voice_error", {"error": error})
+            self._state.record_debug("tts_error", error=error)
+            self._finish_playback_context(context, completed=False)
+            return
+
+        completed = receipt.status == "completed"
+        if completed and kind == "speak":
+            self._emit_delivery(
+                "clause_completed",
+                generation_id=generation_id,
+                text=text,
+            )
+        self._mark_spoke_if_audible(receipt)
+        self._finish_playback_context(context, completed=completed)
+
+    def _handle_paused_playback(
+        self,
+        context: _PlaybackContext,
+        receipt: PlaybackReceipt,
+    ) -> None:
+        with self._interruption_condition:
+            while self._paused_playback is not context:
+                self._interruption_condition.wait(timeout=0.05)
+            while self._interruption_decision is None:
+                self._interruption_condition.wait(timeout=0.05)
+            decision = self._interruption_decision
+
+        if decision == "commit":
+            self._emit_delivery(
+                "clause_abandoned",
+                generation_id=context.generation_id,
+                text=context.text,
+                frames_completed=receipt.frames_completed,
+                total_frames=receipt.total_frames,
+            )
+            self._finish_playback_context(context, completed=False)
+            return
+
+        if decision != "resume" or self._is_stale(context.generation_id):
+            self._player.discard_paused()
+            self._emit_delivery(
+                "clause_abandoned",
+                generation_id=context.generation_id,
+                text=context.text,
+                frames_completed=receipt.frames_completed,
+                total_frames=receipt.total_frames,
+            )
+            self._finish_playback_context(context, completed=False)
+            return
+
+        self._activate_playback_state(context)
+        self._emit_delivery(
+            "clause_resumed",
+            generation_id=context.generation_id,
+            text=context.text,
+            frames_started=receipt.frames_completed,
+        )
+        self._state.record_debug(
+            "tts_resumed",
+            text=context.text,
+            generation_id=context.generation_id,
+            frames_started=receipt.frames_completed,
+        )
+        try:
+            resumed = self._player.resume()
+        except Exception as error:
+            self._event_log.append("voice_error", {"error": str(error)})
+            self._state.record_debug("tts_error", error=str(error))
+            self._finish_playback_context(context, completed=False)
+            return
+
+        completed = resumed.status == "completed"
+        if completed:
+            self._emit_delivery(
+                "clause_completed",
+                generation_id=context.generation_id,
+                text=context.text,
+            )
+        elif resumed.status == "error":
+            error = "audio player failed during resumed playback"
+            self._event_log.append("voice_error", {"error": error})
+            self._state.record_debug("tts_error", error=error)
+        self._mark_spoke_if_audible(resumed)
+        self._finish_playback_context(context, completed=completed)
+
+    def _activate_playback_state(self, context: _PlaybackContext) -> None:
+        with self._state.locked():
+            self._state.speaking = True
+            if context.performance is not None:
+                self._state.performance = context.performance
+        if context.performance is not None:
+            self._state.update_debug(
+                performance_expression=context.performance.expression,
+                performance_intensity=context.performance.intensity,
+            )
+            self._state.record_debug(
+                "performance_started",
+                text=context.text,
+                expression=context.performance.expression,
+                intensity=context.performance.intensity,
+                generation_id=context.generation_id,
+            )
+
+    def _deactivate_playback_state(self, context: _PlaybackContext) -> None:
+        if context.performance is not None:
             with self._state.locked():
-                self._state.speaking = False
-                if played:
-                    self._state.last_spoke = time.time()
-            if played:
-                self._last_playback_ended_at = time.perf_counter()
-                self._last_playback_generation = generation_id
+                self._state.performance = PerformanceCue()
+            self._state.update_debug(
+                performance_expression="neutral",
+                performance_intensity=0.0,
+            )
+            self._state.record_debug(
+                "performance_ended",
+                expression=context.performance.expression,
+                generation_id=context.generation_id,
+            )
+        with self._state.locked():
+            self._state.speaking = False
+
+    def _finish_playback_context(
+        self,
+        context: _PlaybackContext,
+        *,
+        completed: bool,
+    ) -> None:
+        self._deactivate_playback_state(context)
+        with self._interruption_condition:
+            if self._current_playback is context:
+                self._current_playback = None
+            if self._paused_playback is context:
+                self._paused_playback = None
+            self._interruption_decision = None
+            self._interruption_condition.notify_all()
+        if completed:
+            self._last_playback_ended_at = time.perf_counter()
+            self._last_playback_generation = context.generation_id
+
+    def _mark_spoke_if_audible(self, receipt: PlaybackReceipt) -> None:
+        if receipt.frames_completed <= receipt.frames_started:
+            return
+        with self._state.locked():
+            self._state.last_spoke = time.time()
+
+    def _emit_delivery(self, event_type: str, **payload: object) -> None:
+        if self._on_delivery is None:
+            return
+        try:
+            self._on_delivery(event_type, dict(payload))
+        except Exception as error:
+            self._state.record_debug(
+                "delivery_callback_error",
+                event_type=event_type,
+                error=str(error),
+            )
 
     def _is_stale(self, generation_id: int | None) -> bool:
         if generation_id is None:
@@ -454,10 +730,3 @@ def _trim_waveform_edges(
     start = max(0, first - leading_keep)
     end = min(samples.size, last + 1 + trailing_keep)
     return samples[start:end].copy()
-
-
-def _play_audio(audio: np.ndarray, sample_rate: int) -> None:
-    import sounddevice as sound_device
-
-    sound_device.play(audio, sample_rate)
-    sound_device.wait()
