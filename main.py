@@ -6,21 +6,27 @@ face from what it finds. The render loop never waits on perception.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import threading
 import time
 import webbrowser
 from pathlib import Path
+from typing import Any
 
 from brain.llm import ConversationWorker, OllamaClient
 from brain.memory import EventLog
+from brain.turn_coordinator import TurnCoordinator
 from control.web import WebServer
 from output.animator import FaceAnimator
+from output.audio_player import SoundDeviceAudioPlayer
 from output.display import Display, PreviewWindow
 from output.voice import VoiceOutput
-from perception.audio import AudioLoop
 from perception import camera as camera_module
+from perception.audio import AudioLoop
+from perception.audio_preprocess import PassthroughCapturePreprocessor
 from perception.detector import Detector, run_detection_loop
+from perception.interruption import InterruptionDetector
 from performance import load_performance_definitions
 from state import State
 
@@ -34,6 +40,23 @@ FAKE_PERSON_POSITIONS: tuple[tuple[float, float] | None, ...] = (
     (0.88, 0.50),
     (0.50, 0.78),
 )
+
+
+@dataclass
+class VoiceRuntime:
+    preprocessor: Any
+    player: Any
+    voice: Any
+    conversation: Any
+    coordinator: Any
+    audio: Any
+
+    def close(self) -> None:
+        """Shut down capture and timers before workers that they can affect."""
+        self.audio.close()
+        self.coordinator.close()
+        self.conversation.close()
+        self.voice.close()
 
 
 def _load(name: str) -> dict:
@@ -100,6 +123,97 @@ def _build_display(
     return Display(targets), web_server
 
 
+def _build_voice_runtime(
+    config: dict[str, Any],
+    moods: dict[str, dict[str, Any]],
+    performances: dict[str, dict[str, object]],
+    state: State,
+    event_log: Any,
+    *,
+    client: Any | None = None,
+    preprocessor: Any | None = None,
+    interruption_detector: Any | None = None,
+    player_factory: Any = SoundDeviceAudioPlayer,
+    voice_factory: Any = VoiceOutput,
+    conversation_factory: Any = ConversationWorker,
+    coordinator_factory: Any = TurnCoordinator,
+    audio_factory: Any = AudioLoop,
+) -> VoiceRuntime:
+    """Construct the complete voice graph without starting hardware or workers."""
+    audio_settings = config.get("audio", {})
+    barge_in = config.get("barge_in", {})
+
+    if preprocessor is None:
+        preprocessor_name = str(barge_in.get("preprocessor", "passthrough"))
+        if preprocessor_name != "passthrough":
+            raise RuntimeError(f"unsupported barge-in preprocessor: {preprocessor_name}")
+        preprocessor = PassthroughCapturePreprocessor()
+
+    if interruption_detector is None:
+        interruption_detector = InterruptionDetector(
+            int(audio_settings.get("sample_rate", 16_000)),
+            float(audio_settings.get("vad_threshold", 0.015)),
+            float(barge_in.get("pause_after_speech_seconds", 0.25)),
+        )
+
+    player = player_factory(render_callback=preprocessor.push_render_reference)
+    conversation_holder: dict[str, Any] = {}
+
+    def on_delivery(event_type: str, payload: dict[str, object]) -> None:
+        conversation = conversation_holder.get("conversation")
+        if conversation is not None:
+            conversation.handle_delivery(event_type, payload)
+
+    voice = voice_factory(
+        config,
+        state,
+        event_log,
+        player=player,
+        on_delivery=on_delivery,
+    )
+    conversation = conversation_factory(
+        config,
+        moods,
+        state,
+        event_log,
+        client if client is not None else OllamaClient(),
+        voice,
+        performances=performances,
+    )
+    conversation_holder["conversation"] = conversation
+
+    coordinator = coordinator_factory(
+        state,
+        event_log,
+        voice,
+        conversation,
+        conversation.submit,
+        false_timeout_seconds=float(
+            barge_in.get("false_interruption_timeout_seconds", 2.0)
+        ),
+        decision_watchdog_seconds=float(
+            barge_in.get("max_interruption_decision_seconds", 5.0)
+        ),
+    )
+    audio = audio_factory(
+        config,
+        state,
+        event_log,
+        conversation.submit,
+        preprocessor=preprocessor,
+        interruption_detector=interruption_detector,
+        turn_coordinator=coordinator,
+    )
+    return VoiceRuntime(
+        preprocessor=preprocessor,
+        player=player,
+        voice=voice,
+        conversation=conversation,
+        coordinator=coordinator,
+        audio=audio,
+    )
+
+
 def _open_browser(port: int) -> None:
     webbrowser.open(f"http://127.0.0.1:{port}")
 
@@ -124,18 +238,13 @@ def main() -> None:
     state = State()
     animator = FaceAnimator(moods, performances)
     display, web_server = _build_display(config, state, event_log)
-
-    voice = VoiceOutput(config, state, event_log)
-    conversation = ConversationWorker(
+    runtime = _build_voice_runtime(
         config,
         moods,
+        performances,
         state,
         event_log,
-        OllamaClient(),
-        voice,
-        performances=performances,
     )
-    audio = AudioLoop(config, state, event_log, conversation.submit)
 
     stop = threading.Event()
     thread, camera = _start_perception(config, state, stop)
@@ -149,14 +258,13 @@ def main() -> None:
                 daemon=True,
             ).start()
 
-    voice.start()
-    voice.prepare_acknowledgement()
-    conversation.start()
+    runtime.voice.start()
+    runtime.voice.prepare_acknowledgement()
+    runtime.conversation.start()
     try:
-        audio.start()
+        runtime.audio.start()
     except RuntimeError as error:
-        print(f"voice off: {error}")
-        audio = None
+        print(f"voice input off: {error}")
 
     print("keys:")
     for index, name in enumerate(mood_names, start=1):
@@ -202,10 +310,7 @@ def main() -> None:
 
             time.sleep(max(0.0, FRAME_TIME - (time.perf_counter() - now)))
     finally:
-        if audio is not None:
-            audio.close()
-        conversation.close()
-        voice.close()
+        runtime.close()
         stop.set()
         if thread is not None:
             thread.join(timeout=2.0)
