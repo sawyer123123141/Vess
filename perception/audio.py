@@ -119,7 +119,10 @@ class AudioLoop:
         )
         self._conversation_until = 0.0
         self._blocks: queue.Queue[np.ndarray | None] = queue.Queue(maxsize=16)
-        self._utterances: queue.Queue[tuple[np.ndarray, float] | None] = queue.Queue()
+        # One utterance may be in Whisper and only the newest may wait behind it.
+        self._utterances: queue.Queue[tuple[np.ndarray, float] | None] = queue.Queue(
+            maxsize=1
+        )
         self._stop = threading.Event()
         self._transcriber_failed = threading.Event()
         self._thread: threading.Thread | None = None
@@ -162,8 +165,9 @@ class AudioLoop:
 
         self._state.record_debug("transcript", transcript=transcript)
         if not transcript:
-            self._event_log.append("wake_rejected", {"transcript": "", "reason": "empty"})
-            self._state.record_debug("wake_rejected", transcript="", reason="empty")
+            payload = {"transcript": "", "reason": "no_speech"}
+            self._event_log.append("wake_rejected", payload)
+            self._state.record_debug("no_speech_rejected", **payload)
             return
 
         closest = match_wake_phrase(transcript, self._variants, 1_000_000)
@@ -275,11 +279,48 @@ class AudioLoop:
                             "audio_dropped", reason="transcriber_unavailable"
                         )
                     else:
-                        self._utterances.put((utterance, time.perf_counter()))
+                        self._queue_latest_utterance(utterance, time.perf_counter())
         finally:
             with self._state.locked():
                 self._state.listening = False
-            self._utterances.put(None)
+            self._stop_transcription_queue()
+
+    def _queue_latest_utterance(
+        self,
+        utterance: np.ndarray,
+        speech_ended_at: float,
+    ) -> None:
+        item = (utterance, speech_ended_at)
+        while True:
+            try:
+                self._utterances.put_nowait(item)
+                self._state.update_debug(transcription_queue=self._utterances.qsize())
+                return
+            except queue.Full:
+                try:
+                    replaced = self._utterances.get_nowait()
+                except queue.Empty:
+                    continue
+                if replaced is None:
+                    self._utterances.put_nowait(None)
+                    return
+                _, replaced_at = replaced
+                age_ms = (time.perf_counter() - replaced_at) * 1000.0
+                self._state.record_debug(
+                    "pending_utterance_replaced",
+                    age_ms=round(age_ms, 1),
+                )
+
+    def _stop_transcription_queue(self) -> None:
+        while True:
+            try:
+                self._utterances.get_nowait()
+            except queue.Empty:
+                break
+        try:
+            self._utterances.put_nowait(None)
+        except queue.Full:
+            pass
 
     def _ensure_transcribe_thread(self) -> None:
         if self._transcribe_thread is not None:
@@ -306,7 +347,11 @@ class AudioLoop:
             if item is None:
                 return
             utterance, speech_ended_at = item
-            self._state.update_debug(transcription_queue=self._utterances.qsize())
+            age_ms = (time.perf_counter() - speech_ended_at) * 1000.0
+            self._state.update_debug(
+                transcription_queue=self._utterances.qsize(),
+                utterance_age_ms=round(age_ms, 1),
+            )
             self.handle_utterance(utterance, speech_ended_at=speech_ended_at)
 
     def _open_conversation(self) -> None:
@@ -415,6 +460,7 @@ def _make_transcriber(config: dict[str, Any]) -> Callable[[np.ndarray], str]:
             condition_on_previous_text=bool(
                 settings.get("condition_on_previous_text", False)
             ),
+            vad_filter=bool(settings.get("vad_filter", True)),
         )
         return " ".join(segment.text.strip() for segment in segments).strip()
 
