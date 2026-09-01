@@ -242,6 +242,69 @@ assert len(result.frames) == 360
             completed.stdout + completed.stderr,
         )
 
+    def test_trace_records_real_independent_eye_offsets(self) -> None:
+        result = simulate_scenario("conversational_cycle", fps=30, seed=1)
+        playful = [
+            row for row in result.trace
+            if row["phase"] == "speaking_playful"
+        ]
+
+        self.assertTrue(playful)
+        self.assertTrue(
+            any(
+                abs(float(row["left_eye_offset_x"])) > 1e-4
+                or abs(float(row["left_eye_offset_y"])) > 1e-4
+                or abs(float(row["right_eye_offset_x"])) > 1e-4
+                or abs(float(row["right_eye_offset_y"])) > 1e-4
+                for row in playful
+            )
+        )
+
+    def test_eye_reaction_cycle_is_228_frames_and_deterministic(self) -> None:
+        result = simulate_scenario("eye_reaction_cycle", fps=30, seed=1)
+
+        self.assertEqual(len(result.trace), 228)
+        self.assertEqual(
+            verify_determinism("eye_reaction_cycle", fps=30, seed=1),
+            [],
+        )
+
+    def test_eye_offset_bounds_failure_reports_exact_frame(self) -> None:
+        result = simulate_scenario("conversational_cycle", fps=30, seed=1)
+        result.trace[20]["left_eye_offset_y"] = -1.75
+
+        failure = next(
+            item
+            for item in check_invariants(result)
+            if item.invariant == "eye offset bounds"
+        )
+
+        self.assertEqual(failure.frame, 20)
+        self.assertEqual(failure.observed["left_eye_offset_y"], -1.75)
+
+    def test_eye_reaction_release_moves_toward_neutral_target(self) -> None:
+        result = simulate_scenario("eye_reaction_cycle", fps=30, seed=1)
+        rows = [row for row in result.trace if row["phase"] == "neutral_2"]
+        release = [row for row in rows if row["eye_reaction_phase"] == "release"]
+
+        self.assertGreaterEqual(len(release), 2)
+        distances = [
+            abs(float(row["left_eye_offset_x"]) - float(row["left_eye_settled_target_x"]))
+            + abs(float(row["left_eye_offset_y"]) - float(row["left_eye_settled_target_y"]))
+            + abs(float(row["right_eye_offset_x"]) - float(row["right_eye_settled_target_x"]))
+            + abs(float(row["right_eye_offset_y"]) - float(row["right_eye_settled_target_y"]))
+            for row in release
+        ]
+        self.assertLess(distances[-1], distances[0])
+
+    def test_eye_motion_metrics_are_trace_derived(self) -> None:
+        result = simulate_scenario("conversational_cycle", fps=30, seed=1)
+        metrics = calculate_metrics(result)
+        playful = metrics["eye_motion_by_performance"]["playful"]
+
+        self.assertGreater(playful["right_peak_y"], 0.0)
+        self.assertGreater(playful["max_asymmetry"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
