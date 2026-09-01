@@ -121,6 +121,24 @@ class AnimatorTests(unittest.TestCase):
         self.assertEqual(animator._performance_target["l_h"], 0.0)
         self.assertEqual(animator._performance_target["speaking_break_scale"], 1.0)
 
+    def test_performance_does_not_change_mood_color(self) -> None:
+        neutral = FaceAnimator(MOODS, PERFORMANCES, seed=1)
+        playful = FaceAnimator(MOODS, PERFORMANCES, seed=1)
+        neutral_state = State(mood="curious", performance=PerformanceCue())
+        playful_state = State(
+            mood="curious",
+            performance=PerformanceCue("playful", 0.65),
+        )
+
+        for _ in range(30):
+            neutral.tick(neutral_state, 1 / 30)
+            playful.tick(playful_state, 1 / 30)
+
+        self.assertEqual(
+            neutral.debug_snapshot()["color"],
+            playful.debug_snapshot()["color"],
+        )
+
     def test_debug_snapshot_reports_render_values(self) -> None:
         state = State(
             speaking=True,
