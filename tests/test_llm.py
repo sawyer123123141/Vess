@@ -68,10 +68,14 @@ class LlmTests(unittest.TestCase):
             log.events,
             [("mood_changed", {"from": "neutral", "to": "annoyed"})],
         )
+        events = state.debug_snapshot()["events"]
         self.assertEqual(
-            [event["event"] for event in state.debug_snapshot()["events"]],
+            [event["event"] for event in events],
             ["llm_started", "llm_first_clause", "llm_complete", "mood_changed"],
         )
+        first_clause = next(event for event in events if event["event"] == "llm_first_clause")
+        self.assertIn("latency_ms", first_clause)
+        self.assertGreaterEqual(first_clause["latency_ms"], 0.0)
 
 
 class FakeResponse:

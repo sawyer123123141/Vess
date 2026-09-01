@@ -188,6 +188,7 @@ class ConversationWorker:
 
         with self._state.locked():
             self._state.thinking = True
+        llm_started_at = time.perf_counter()
         self._state.record_debug("llm_started", request=user_request)
         try:
             prompt = build_prompt(self._config, self._state, user_request)
@@ -196,7 +197,14 @@ class ConversationWorker:
                 with self._state.locked():
                     self._state.thinking = False
                 if first_clause:
-                    self._state.record_debug("llm_first_clause", clause=clause)
+                    latency_ms = (time.perf_counter() - llm_started_at) * 1000.0
+                    rounded = round(latency_ms, 1)
+                    self._state.update_debug(llm_first_clause_ms=rounded)
+                    self._state.record_debug(
+                        "llm_first_clause",
+                        clause=clause,
+                        latency_ms=rounded,
+                    )
                     first_clause = False
                 self._voice.enqueue(clause)
             self._state.record_debug("llm_complete")

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from math import ceil
 import queue
 import threading
+import time
 from typing import Any, Callable
 
 import numpy as np
@@ -28,12 +30,17 @@ class UtteranceAssembler:
         min_utterance_seconds: float,
         silence_seconds: float,
         max_utterance_seconds: float,
+        pre_roll_seconds: float = 0.25,
     ) -> None:
         self._sample_rate = sample_rate
         self._threshold = threshold
+        self._pre_roll_floor = threshold * 0.25
         self._min_samples = ceil(sample_rate * min_utterance_seconds)
         self._silence_samples = ceil(sample_rate * silence_seconds)
         self._max_samples = ceil(sample_rate * max_utterance_seconds)
+        self._pre_roll: deque[float] = deque(
+            maxlen=max(ceil(sample_rate * pre_roll_seconds), 0)
+        )
         self._samples: list[float] = []
         self._trailing_quiet = 0
 
@@ -43,7 +50,10 @@ class UtteranceAssembler:
             amplitude = abs(float(sample))
             if not self._samples:
                 if amplitude < self._threshold:
+                    self._pre_roll.append(float(sample))
                     continue
+                self._samples.extend(self._useful_pre_roll())
+                self._pre_roll.clear()
                 self._samples.append(sample)
                 self._trailing_quiet = 0
                 continue
@@ -67,6 +77,14 @@ class UtteranceAssembler:
             "vad_seconds": len(self._samples) / self._sample_rate,
         }
 
+    def _useful_pre_roll(self) -> list[float]:
+        """Keep contiguous pre-trigger audio once it rises above deep silence."""
+        buffered = list(self._pre_roll)
+        for index, sample in enumerate(buffered):
+            if abs(sample) >= self._pre_roll_floor:
+                return buffered[index:]
+        return []
+
     def _finish(self) -> np.ndarray | None:
         final_index = len(self._samples) - self._trailing_quiet
         utterance = np.asarray(self._samples[:final_index])
@@ -78,7 +96,7 @@ class UtteranceAssembler:
 
 
 class AudioLoop:
-    """Capture utterances and dispatch only fuzzy wake-phrase requests."""
+    """Capture utterances and dispatch wake phrases or active-conversation followups."""
 
     def __init__(
         self,
@@ -96,22 +114,34 @@ class AudioLoop:
         self._transcribe = transcribe
         self._variants = list(settings.get("wake_variants", ["hey vess"]))
         self._max_distance = int(settings.get("wake_max_distance", 2))
+        self._conversation_timeout = float(
+            settings.get("conversation_timeout_seconds", 30.0)
+        )
+        self._conversation_until = 0.0
         self._blocks: queue.Queue[np.ndarray | None] = queue.Queue(maxsize=16)
+        self._utterances: queue.Queue[tuple[np.ndarray, float] | None] = queue.Queue()
         self._stop = threading.Event()
+        self._transcriber_failed = threading.Event()
         self._thread: threading.Thread | None = None
+        self._transcribe_thread: threading.Thread | None = None
         self._stream: Any = None
         self._assembler = UtteranceAssembler(
             int(settings.get("sample_rate", 16_000)),
             float(settings.get("vad_threshold", 0.015)),
             float(settings.get("min_utterance_seconds", 0.25)),
-            float(settings.get("silence_seconds", 0.8)),
+            float(settings.get("silence_seconds", 0.45)),
             float(settings.get("max_utterance_seconds", 15.0)),
+            float(settings.get("pre_roll_seconds", 0.25)),
         )
 
-    def handle_utterance(self, samples: np.ndarray) -> None:
-        """Transcribe one utterance and either log rejection or dispatch it."""
-        with self._state.locked():
-            self._state.listening = True
+    def handle_utterance(
+        self,
+        samples: np.ndarray,
+        *,
+        speech_ended_at: float | None = None,
+    ) -> None:
+        """Transcribe one utterance and dispatch it if the conversation gate allows."""
+        transcription_started = time.perf_counter()
         try:
             if self._transcribe is None:
                 raise RuntimeError("audio loop was not started")
@@ -120,25 +150,45 @@ class AudioLoop:
             self._event_log.append("audio_error", {"error": str(error)})
             self._state.record_debug("audio_error", error=str(error))
             return
-        finally:
-            with self._state.locked():
-                self._state.listening = False
+
+        transcription_finished = time.perf_counter()
+        if speech_ended_at is not None:
+            transcription_ms = (transcription_finished - transcription_started) * 1000.0
+            speech_to_transcript_ms = (transcription_finished - speech_ended_at) * 1000.0
+            self._state.update_debug(
+                transcription_ms=round(transcription_ms, 1),
+                speech_to_transcript_ms=round(speech_to_transcript_ms, 1),
+            )
 
         self._state.record_debug("transcript", transcript=transcript)
+        if not transcript:
+            self._event_log.append("wake_rejected", {"transcript": "", "reason": "empty"})
+            self._state.record_debug("wake_rejected", transcript="", reason="empty")
+            return
+
         closest = match_wake_phrase(transcript, self._variants, 1_000_000)
         accepted = (
             closest if closest is not None and closest.distance <= self._max_distance else None
         )
         payload = _wake_payload(transcript, closest)
-        if accepted is None:
-            self._event_log.append("wake_rejected", payload)
-            self._state.record_debug("wake_rejected", **payload)
+        if accepted is not None:
+            self._open_conversation()
+            self._event_log.append("wake_accepted", payload)
+            self._state.record_debug("wake_accepted", **payload)
+            request = " ".join(transcript.split()[accepted.consumed_words:])
+            self._on_request(request)
             return
 
-        self._event_log.append("wake_accepted", payload)
-        self._state.record_debug("wake_accepted", **payload)
-        request = " ".join(transcript.split()[accepted.consumed_words:])
-        self._on_request(request)
+        if self._conversation_is_active():
+            self._open_conversation()
+            followup_payload = {"transcript": transcript}
+            self._event_log.append("followup_accepted", followup_payload)
+            self._state.record_debug("followup_accepted", **followup_payload)
+            self._on_request(transcript)
+            return
+
+        self._event_log.append("wake_rejected", payload)
+        self._state.record_debug("wake_rejected", **payload)
 
     def start(self) -> None:
         """Open the microphone and begin processing queued audio blocks."""
@@ -170,7 +220,7 @@ class AudioLoop:
         self._thread.start()
 
     def close(self) -> None:
-        """Stop capture and wait for the audio worker to exit."""
+        """Stop capture and wait for the audio workers to exit."""
         self._stop.set()
         if self._stream is not None:
             self._stream.stop()
@@ -183,6 +233,9 @@ class AudioLoop:
                 pass
             self._thread.join()
             self._thread = None
+        if self._transcribe_thread is not None:
+            self._transcribe_thread.join()
+            self._transcribe_thread = None
 
     def _on_audio(self, indata: np.ndarray, *_: object) -> None:
         try:
@@ -191,31 +244,89 @@ class AudioLoop:
             pass
 
     def _run(self) -> None:
+        self._ensure_transcribe_thread()
+        try:
+            while not self._stop.is_set():
+                block = self._blocks.get()
+                if block is None:
+                    return
+                with self._state.locked():
+                    speaking = self._state.speaking
+                if speaking:
+                    with self._state.locked():
+                        self._state.listening = False
+                    self._state.update_debug(audio_ignored=True)
+                    continue
+
+                utterance = self._assembler.push(block)
+                status = self._assembler.status()
+                with self._state.locked():
+                    self._state.listening = bool(status["vad_active"])
+                peak = float(np.max(np.abs(block))) if block.size else 0.0
+                self._state.update_debug(
+                    audio_ignored=False,
+                    mic_peak=round(peak, 4),
+                    transcription_queue=self._utterances.qsize(),
+                    **status,
+                )
+                if utterance is not None:
+                    if self._transcriber_failed.is_set():
+                        self._state.record_debug(
+                            "audio_dropped", reason="transcriber_unavailable"
+                        )
+                    else:
+                        self._utterances.put((utterance, time.perf_counter()))
+        finally:
+            with self._state.locked():
+                self._state.listening = False
+            self._utterances.put(None)
+
+    def _ensure_transcribe_thread(self) -> None:
+        if self._transcribe_thread is not None:
+            return
+        self._transcribe_thread = threading.Thread(
+            target=self._run_transcription,
+            name="audio-transcribe",
+            daemon=True,
+        )
+        self._transcribe_thread.start()
+
+    def _run_transcription(self) -> None:
         if self._transcribe is None:
             try:
                 self._transcribe = _make_transcriber(self._config)
             except Exception as error:
+                self._transcriber_failed.set()
                 self._event_log.append("audio_error", {"error": str(error)})
                 self._state.record_debug("audio_error", error=str(error))
                 return
-        while not self._stop.is_set():
-            block = self._blocks.get()
-            if block is None:
+
+        while True:
+            item = self._utterances.get()
+            if item is None:
                 return
-            with self._state.locked():
-                speaking = self._state.speaking
-            if speaking:
-                self._state.update_debug(audio_ignored=True)
-                continue
-            utterance = self._assembler.push(block)
-            peak = float(np.max(np.abs(block))) if block.size else 0.0
-            self._state.update_debug(
-                audio_ignored=False,
-                mic_peak=round(peak, 4),
-                **self._assembler.status(),
-            )
-            if utterance is not None:
-                self.handle_utterance(utterance)
+            utterance, speech_ended_at = item
+            self._state.update_debug(transcription_queue=self._utterances.qsize())
+            self.handle_utterance(utterance, speech_ended_at=speech_ended_at)
+
+    def _open_conversation(self) -> None:
+        if self._conversation_timeout <= 0.0:
+            return
+        self._conversation_until = time.time() + self._conversation_timeout
+        self._state.update_debug(conversation_active=True)
+
+    def _conversation_is_active(self) -> bool:
+        if self._conversation_timeout <= 0.0:
+            return False
+        with self._state.locked():
+            last_spoke = float(self._state.last_spoke)
+        deadline = max(
+            self._conversation_until,
+            last_spoke + self._conversation_timeout,
+        )
+        active = time.time() <= deadline
+        self._state.update_debug(conversation_active=active)
+        return active
 
 
 def match_wake_phrase(
@@ -297,7 +408,14 @@ def _make_transcriber(config: dict[str, Any]) -> Callable[[np.ndarray], str]:
     )
 
     def transcribe(samples: np.ndarray) -> str:
-        segments, _ = model.transcribe(samples)
+        segments, _ = model.transcribe(
+            samples,
+            language=settings.get("language", "en"),
+            beam_size=int(settings.get("beam_size", 1)),
+            condition_on_previous_text=bool(
+                settings.get("condition_on_previous_text", False)
+            ),
+        )
         return " ".join(segment.text.strip() for segment in segments).strip()
 
     return transcribe
