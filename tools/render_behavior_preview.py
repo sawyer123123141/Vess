@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import math
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Iterable
 
 import numpy as np
+from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -29,6 +31,12 @@ from tools.behavior_scenarios import (
 _PANEL_MIN = 1.0
 _PANEL_MAX = 63.0
 _TRANSITION_SECONDS = 0.25
+_DEFAULT_OUTPUT = ROOT / "artifacts" / "behavior-verification"
+_DEFAULT_SCENARIOS = (
+    "conversational_cycle",
+    "priority_conflicts",
+    "geometry_stress",
+)
 _SHAPE_DELTA_KEYS = (
     "l_h",
     "r_h",
@@ -325,6 +333,127 @@ def build_summary(
         )
 
     return "\n".join(lines) + "\n"
+
+
+def write_trace(result: SimulationResult, output_dir: Path) -> Path:
+    """Write schema-versioned machine-readable evidence for one scenario."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / "trace.json"
+    payload = {
+        "schema_version": 1,
+        "fps": result.fps,
+        "seed": result.seed,
+        "scenario": result.scenario,
+        "frames": result.trace,
+    }
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def write_preview(
+    result: SimulationResult,
+    output_dir: Path,
+    *,
+    sample_every: int = 2,
+    scale: int = 6,
+) -> Path:
+    """Encode sampled real animator frames into a phone-readable GIF."""
+    if sample_every <= 0:
+        raise ValueError("sample_every must be positive")
+    if scale <= 0:
+        raise ValueError("scale must be positive")
+    if not result.frames or len(result.frames) != len(result.trace):
+        raise ValueError("preview requires matching non-empty frames and trace")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    gif_frames: list[Image.Image] = []
+    label_height = 24
+    for index in range(0, len(result.frames), sample_every):
+        native = result.frames[index]
+        row = result.trace[index]
+        image = Image.fromarray(native)
+        scaled = image.resize(
+            (native.shape[1] * scale, native.shape[0] * scale),
+            resample=Image.Resampling.NEAREST,
+        )
+        canvas = Image.new(
+            "RGB",
+            (scaled.width, scaled.height + label_height),
+            (16, 17, 20),
+        )
+        draw = ImageDraw.Draw(canvas)
+        label = (
+            f"{row['phase']} | {row['interaction_mode']} | "
+            f"{row['performance_expression']}"
+        )
+        draw.text((6, 6), label, fill=(235, 235, 240))
+        canvas.paste(scaled, (0, label_height))
+        gif_frames.append(canvas)
+
+    path = output_dir / "preview.gif"
+    duration_ms = max(1, round(1000.0 * sample_every / result.fps))
+    gif_frames[0].save(
+        path,
+        save_all=True,
+        append_images=gif_frames[1:],
+        duration=duration_ms,
+        loop=0,
+    )
+    return path
+
+
+def run_verification(
+    *,
+    scenarios: tuple[str, ...] = _DEFAULT_SCENARIOS,
+    seed: int = 1,
+    fps: int = 30,
+    output_dir: Path | None = None,
+    include_gif: bool = True,
+) -> tuple[int, str]:
+    """Run selected scenarios, always writing a readable summary when possible."""
+    output = output_dir or _DEFAULT_OUTPUT
+    try:
+        output.mkdir(parents=True, exist_ok=True)
+        if not scenarios:
+            raise ValueError("at least one behavior scenario is required")
+
+        results: list[SimulationResult] = []
+        deterministic: dict[str, bool] = {}
+        for name in scenarios:
+            result = simulate_scenario(name, fps=fps, seed=seed)
+            result.failures.extend(check_invariants(result))
+            determinism_failures = verify_determinism(name, fps=fps, seed=seed)
+            deterministic[name] = not determinism_failures
+            result.failures.extend(determinism_failures)
+            results.append(result)
+
+        artifact_source = next(
+            (
+                result
+                for result in results
+                if result.scenario == "conversational_cycle"
+            ),
+            results[0],
+        )
+        write_trace(artifact_source, output)
+        preview_path = output / "preview.gif"
+        if include_gif:
+            write_preview(artifact_source, output)
+        elif preview_path.exists():
+            preview_path.unlink()
+
+        summary = build_summary(results, deterministic=deterministic)
+        (output / "summary.txt").write_text(summary, encoding="utf-8")
+        code = 1 if any(result.failures for result in results) else 0
+        return code, summary
+    except Exception as error:
+        summary = f"HARNESS ERROR\n\n{type(error).__name__}: {error}\n"
+        try:
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "summary.txt").write_text(summary, encoding="utf-8")
+        except OSError:
+            pass
+        return 2, summary
 
 
 def _load_json(name: str) -> dict[str, object]:
@@ -848,5 +977,32 @@ def _format_seconds(value: object) -> str:
     return f"{float(value):.3f} s"
 
 
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Render deterministic Vess behavior evidence")
+    parser.add_argument(
+        "--scenario",
+        choices=("all",) + _DEFAULT_SCENARIOS,
+        default="all",
+    )
+    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--output", type=Path, default=_DEFAULT_OUTPUT)
+    parser.add_argument("--no-gif", action="store_true")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+    scenarios = _DEFAULT_SCENARIOS if args.scenario == "all" else (args.scenario,)
+    code, summary = run_verification(
+        scenarios=scenarios,
+        seed=args.seed,
+        fps=30,
+        output_dir=args.output,
+        include_gif=not args.no_gif,
+    )
+    print(summary, end="")
+    return code
+
+
 if __name__ == "__main__":
-    simulate_scenario("conversational_cycle")
+    raise SystemExit(main())
