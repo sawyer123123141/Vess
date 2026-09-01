@@ -1,8 +1,11 @@
 """Deterministic audio gate behavior."""
 
+import sys
 import threading
 import time
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -10,6 +13,7 @@ from perception.audio import (
     AudioLoop,
     UtteranceAssembler,
     WakeMatch,
+    _make_transcriber,
     match_wake_phrase,
 )
 from state import State
@@ -141,6 +145,26 @@ class AudioLoopTests(unittest.TestCase):
 
         self.assertEqual(dispatched, ["how are you", "not bad"])
 
+    def test_transcription_records_latency_from_speech_end(self) -> None:
+        state = State()
+        loop = AudioLoop(
+            CONFIG,
+            state,
+            RecordingLog(),
+            lambda _: None,
+            transcribe=lambda _: "hey vess hello",
+        )
+
+        loop.handle_utterance(
+            np.ones(16_000, dtype=np.float32),
+            speech_ended_at=time.perf_counter() - 0.05,
+        )
+
+        values = state.debug_snapshot()["values"]
+        self.assertIn("transcription_ms", values)
+        self.assertIn("speech_to_transcript_ms", values)
+        self.assertGreaterEqual(values["speech_to_transcript_ms"], values["transcription_ms"])
+
     def test_capture_keeps_draining_blocks_while_transcription_runs(self) -> None:
         transcribe_started = threading.Event()
         release_transcribe = threading.Event()
@@ -222,6 +246,44 @@ class AudioLoopTests(unittest.TestCase):
         worker.join(timeout=1.0)
         if loop._transcribe_thread is not None:
             loop._transcribe_thread.join(timeout=1.0)
+
+
+class TranscriberTests(unittest.TestCase):
+    def test_transcriber_uses_low_latency_english_decoding(self) -> None:
+        captured: dict[str, object] = {}
+
+        class FakeWhisperModel:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def transcribe(self, samples: np.ndarray, **kwargs: object):
+                captured.update(kwargs)
+                return [SimpleNamespace(text="hello")], None
+
+        fake_module = SimpleNamespace(WhisperModel=FakeWhisperModel)
+        config = {
+            "whisper": {
+                "model": "small",
+                "device": "cpu",
+                "compute_type": "int8",
+                "language": "en",
+                "beam_size": 1,
+                "condition_on_previous_text": False,
+            }
+        }
+        with patch.dict(sys.modules, {"faster_whisper": fake_module}):
+            transcribe = _make_transcriber(config)
+            transcript = transcribe(np.ones(160, dtype=np.float32))
+
+        self.assertEqual(transcript, "hello")
+        self.assertEqual(
+            captured,
+            {
+                "language": "en",
+                "beam_size": 1,
+                "condition_on_previous_text": False,
+            },
+        )
 
 
 class RecordingLog:
