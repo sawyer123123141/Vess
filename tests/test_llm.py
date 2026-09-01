@@ -1,9 +1,11 @@
 """Prompt and stream parsing behavior for the local LLM client."""
 
 import json
+import time
 import unittest
 
 from brain.llm import ConversationWorker, OllamaClient, build_prompt, split_clauses
+from brain.memory import append_conversation_turn
 from state import State
 
 
@@ -14,17 +16,59 @@ class LlmTests(unittest.TestCase):
             ["First,", "then second.", "Last"],
         )
 
-    def test_prompt_puts_stable_identity_before_dynamic_state(self) -> None:
+    def test_prompt_puts_grounded_identity_and_history_before_current_request(self) -> None:
         config = {
             "personas": {"friendly": "Warm and casual."},
+            "memory": {"short_term_minutes": 10, "short_term_turns": 8},
+        }
+        moods = {
+            "neutral": {"prompt": ""},
+            "annoyed": {"prompt": "You're mildly irritated."},
         }
         state = State(persona="friendly", mood="annoyed", person_present=True)
+        append_conversation_turn(
+            state,
+            "How was your day?",
+            "Pretty quiet so far.",
+            timestamp=time.time(),
+            max_age_seconds=600.0,
+            max_turns=8,
+        )
 
-        prompt = build_prompt(config, state, "What time is it?")
+        prompt = build_prompt(config, moods, state, "Why?")
 
-        self.assertLess(prompt.index("You are Vess."), prompt.index("Current state:"))
-        self.assertIn("Mood: annoyed", prompt)
-        self.assertIn("Request: What time is it?", prompt)
+        self.assertLess(prompt.index("You are Vess"), prompt.index("Current state:"))
+        self.assertIn("human body", prompt.lower())
+        self.assertIn("do not invent", prompt.lower())
+        self.assertIn("Mood: annoyed. You're mildly irritated.", prompt)
+        self.assertIn("Recent conversation:", prompt)
+        self.assertIn("User: How was your day?", prompt)
+        self.assertIn("Vess: Pretty quiet so far.", prompt)
+        self.assertLess(
+            prompt.index("User: How was your day?"),
+            prompt.index("Current request:\nWhy?"),
+        )
+
+    def test_prompt_omits_expired_history(self) -> None:
+        config = {
+            "personas": {"friendly": "Warm and casual."},
+            "memory": {"short_term_minutes": 1, "short_term_turns": 8},
+        }
+        state = State()
+        append_conversation_turn(
+            state,
+            "ancient question",
+            "ancient answer",
+            timestamp=1.0,
+            max_age_seconds=10_000_000_000.0,
+            max_turns=8,
+        )
+
+        prompt = build_prompt(config, {"neutral": {"prompt": ""}}, state, "Hello")
+
+        self.assertNotIn("Recent conversation:", prompt)
+        self.assertNotIn("ancient question", prompt)
+        self.assertIn("Current request:\nHello", prompt)
 
     def test_stream_uses_local_generate_json_lines(self) -> None:
         requests = []
@@ -43,7 +87,7 @@ class LlmTests(unittest.TestCase):
             "num_predict": 80,
         })
 
-    def test_conversation_streams_clauses_and_logs_valid_mood_change(self) -> None:
+    def test_conversation_streams_clauses_remembers_turn_and_logs_valid_mood_change(self) -> None:
         state = State()
         voice = RecordingVoice()
         log = RecordingLog()
@@ -61,12 +105,25 @@ class LlmTests(unittest.TestCase):
         worker.close()
 
         self.assertEqual(voice.clauses, ["First,", "then second."])
+        self.assertEqual(
+            [(turn.user, turn.assistant) for turn in state.conversation_turns],
+            [("Tell me something", "First, then second.")],
+        )
         self.assertEqual(state.mood, "annoyed")
         self.assertGreater(state.mood_until, 0.0)
         self.assertFalse(state.thinking)
         self.assertEqual(
             log.events,
-            [("mood_changed", {"from": "neutral", "to": "annoyed"})],
+            [
+                (
+                    "conversation_turn",
+                    {
+                        "user": "Tell me something",
+                        "assistant": "First, then second.",
+                    },
+                ),
+                ("mood_changed", {"from": "neutral", "to": "annoyed"}),
+            ],
         )
         events = state.debug_snapshot()["events"]
         self.assertEqual(

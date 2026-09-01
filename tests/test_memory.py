@@ -29,6 +29,39 @@ class EventLogTests(unittest.TestCase):
         self.assertEqual(row[0:2], (12.5, "wake_rejected"))
         self.assertEqual(json.loads(row[2]), {"transcript": "hey guess"})
 
+    def test_completed_conversation_turn_payload_round_trips(self) -> None:
+        event_log = _event_log_class()
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "events.sqlite3"
+            log = event_log(path)
+            log.append(
+                "conversation_turn",
+                {
+                    "user": "How was your day?",
+                    "assistant": "Pretty quiet so far.",
+                },
+                timestamp=20.0,
+            )
+            log.close()
+
+            connection = sqlite3.connect(path)
+            try:
+                event_type, payload_json = connection.execute(
+                    "SELECT event_type, payload_json FROM events"
+                ).fetchone()
+            finally:
+                connection.close()
+
+        self.assertEqual(event_type, "conversation_turn")
+        self.assertEqual(
+            json.loads(payload_json),
+            {
+                "user": "How was your day?",
+                "assistant": "Pretty quiet so far.",
+            },
+        )
+
 
 def _event_log_class():
     try:

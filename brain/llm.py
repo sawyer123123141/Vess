@@ -10,28 +10,72 @@ from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 from urllib import request as url_request
 
+from brain.memory import append_conversation_turn, recent_conversation_turns
 
-def build_prompt(config: dict[str, Any], state: Any, request: str) -> str:
-    """Build the cache-friendly stable instruction before live state."""
+
+_IDENTITY_PROMPT = (
+    "You are Vess, a local ambient AI represented by a small expressive face on a wall. "
+    "You do not have a human body or an offline physical life. Do not invent human "
+    "activities or experiences such as eating, driving somewhere, sleeping in a bed, "
+    "or going to school or work. Treat your actual recent conversations, observations, "
+    "room state, and current mood as your lived runtime experience. For casual questions "
+    "about your day or feelings, answer naturally from that real context; if little has "
+    "happened, it is fine to say things have been quiet. Speak conversationally rather "
+    "than like customer support. Answer the user's actual question first. Do not "
+    "automatically end every response with a question, and do not repeatedly explain "
+    "that you are an AI unless it is relevant or asked about. Playfulness is allowed; "
+    "fabricated human experiences are not. Reply naturally and concisely, in at most "
+    "two sentences."
+)
+
+
+def build_prompt(
+    config: dict[str, Any],
+    moods: dict[str, dict[str, Any]],
+    state: Any,
+    request: str,
+) -> str:
+    """Build the cache-friendly identity, recent context, and current request."""
     with state.locked():
         persona = state.persona
         mood = state.mood
         person_present = state.person_present
         objects = list(state.objects)
 
+    max_age_seconds, max_turns = _memory_limits(config)
+    turns = recent_conversation_turns(
+        state,
+        max_age_seconds=max_age_seconds,
+        max_turns=max_turns,
+    )
+
     persona_instruction = config.get("personas", {}).get(persona, "")
+    mood_instruction = moods.get(mood, {}).get("prompt", "")
     presence = "someone is present" if person_present else "the room is empty"
     seen_objects = ", ".join(objects) if objects else "none"
-    return (
-        "You are Vess. You live as a small expressive face on a wall. "
-        "Reply naturally and concisely, in at most two sentences.\n\n"
-        "Current state:\n"
-        f"Persona: {persona}. {persona_instruction}\n"
-        f"Mood: {mood}\n"
-        f"Room: {presence}\n"
-        f"Visible objects: {seen_objects}\n"
-        f"Request: {request}"
-    )
+
+    mood_line = f"Mood: {mood}."
+    if mood_instruction:
+        mood_line += f" {mood_instruction}"
+
+    sections = [
+        _IDENTITY_PROMPT,
+        (
+            "Current state:\n"
+            f"Persona: {persona}. {persona_instruction}\n"
+            f"{mood_line}\n"
+            f"Room: {presence}\n"
+            f"Visible objects: {seen_objects}"
+        ),
+    ]
+    if turns:
+        history_lines = ["Recent conversation:"]
+        for turn in turns:
+            history_lines.append(f"User: {turn.user}")
+            history_lines.append(f"Vess: {turn.assistant}")
+        sections.append("\n".join(history_lines))
+    sections.append(f"Current request:\n{request}")
+    return "\n\n".join(sections)
 
 
 def split_clauses(chunks: Iterable[str]) -> Iterator[str]:
@@ -244,8 +288,9 @@ class ConversationWorker:
             generation_id=generation_id,
         )
         try:
-            prompt = build_prompt(self._config, self._state, user_request)
+            prompt = build_prompt(self._config, self._moods, self._state, user_request)
             first_clause = True
+            spoken_clauses: list[str] = []
             for clause in split_clauses(self._client.stream(prompt, self._config)):
                 if not self._is_latest(generation_id):
                     self._state.record_debug(
@@ -266,9 +311,14 @@ class ConversationWorker:
                         generation_id=generation_id,
                     )
                     first_clause = False
+                spoken_clauses.append(clause)
                 self._voice.enqueue(clause, generation_id=generation_id)
 
-            if not self._is_latest(generation_id):
+            if not self._remember_completed_turn(
+                generation_id,
+                user_request,
+                spoken_clauses,
+            ):
                 self._state.record_debug(
                     "stale_response_cancelled",
                     generation_id=generation_id,
@@ -289,6 +339,37 @@ class ConversationWorker:
         finally:
             with self._state.locked():
                 self._state.thinking = False
+
+    def _remember_completed_turn(
+        self,
+        generation_id: int,
+        user_request: str,
+        spoken_clauses: list[str],
+    ) -> bool:
+        assistant_response = " ".join(spoken_clauses).strip()
+        with self._request_lock:
+            if generation_id != self._latest_generation:
+                return False
+            if not assistant_response:
+                return True
+
+            max_age_seconds, max_turns = _memory_limits(self._config)
+            append_conversation_turn(
+                self._state,
+                user_request,
+                assistant_response,
+                max_age_seconds=max_age_seconds,
+                max_turns=max_turns,
+            )
+            self._event_log.append(
+                "conversation_turn",
+                {"user": user_request, "assistant": assistant_response},
+            )
+
+        with self._state.locked():
+            remembered_turns = len(self._state.conversation_turns)
+        self._state.update_debug(short_term_turns=remembered_turns)
+        return True
 
     def _is_latest(self, generation_id: int) -> bool:
         with self._request_lock:
@@ -316,6 +397,13 @@ class ConversationWorker:
         self._state.record_debug(
             "mood_changed", previous_mood=previous_mood, mood=mood
         )
+
+
+def _memory_limits(config: dict[str, Any]) -> tuple[float, int]:
+    settings = config.get("memory", {})
+    max_age_seconds = float(settings.get("short_term_minutes", 10)) * 60.0
+    max_turns = int(settings.get("short_term_turns", 8))
+    return max_age_seconds, max_turns
 
 
 def _request_key(value: str) -> str:

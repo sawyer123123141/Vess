@@ -142,6 +142,14 @@ class QueueClient:
         return None
 
 
+class ImmediateClient:
+    def stream(self, prompt: str, config: dict):
+        yield "First, then second."
+
+    def classify_mood(self, transcript: str, mood_names: set[str], config: dict):
+        return None
+
+
 class ConversationFreshnessTests(unittest.TestCase):
     def test_duplicate_active_requests_collapse_and_latest_pending_wins(self) -> None:
         client = QueueClient()
@@ -165,11 +173,47 @@ class ConversationFreshnessTests(unittest.TestCase):
         worker.close()
 
         self.assertEqual(len(client.prompts), 2)
-        self.assertIn("Request: newest question", client.prompts[-1])
+        self.assertIn("Current request:\nnewest question", client.prompts[-1])
         events = [event["event"] for event in state.debug_snapshot()["events"]]
         self.assertIn("duplicate_request", events)
 
-    def test_new_request_cancels_old_unspoken_clauses(self) -> None:
+    def test_completed_latest_response_is_remembered_once(self) -> None:
+        voice = RecordingGenerationVoice()
+        state = State()
+        log = RecordingLog()
+        worker = ConversationWorker(
+            {
+                "personas": {"friendly": "Warm."},
+                "memory": {"short_term_minutes": 10, "short_term_turns": 8},
+            },
+            {"neutral": {}},
+            state,
+            log,
+            ImmediateClient(),
+            voice,
+        )
+        worker.start()
+        worker.submit("Tell me something")
+        worker.close()
+
+        self.assertEqual(len(state.conversation_turns), 1)
+        turn = state.conversation_turns[0]
+        self.assertEqual(turn.user, "Tell me something")
+        self.assertEqual(turn.assistant, "First, then second.")
+        self.assertEqual(
+            [event for event in log.events if event[0] == "conversation_turn"],
+            [
+                (
+                    "conversation_turn",
+                    {
+                        "user": "Tell me something",
+                        "assistant": "First, then second.",
+                    },
+                )
+            ],
+        )
+
+    def test_new_request_cancels_old_unspoken_clauses_and_old_memory(self) -> None:
         release_second_clause = threading.Event()
 
         class SwitchingClient:
@@ -190,11 +234,12 @@ class ConversationFreshnessTests(unittest.TestCase):
 
         voice = RecordingGenerationVoice()
         state = State()
+        log = RecordingLog()
         worker = ConversationWorker(
             {"personas": {"friendly": "Warm."}},
             {"neutral": {}},
             state,
-            RecordingLog(),
+            log,
             SwitchingClient(),
             voice,
         )
@@ -209,10 +254,47 @@ class ConversationFreshnessTests(unittest.TestCase):
         self.assertIn("Old first.", spoken)
         self.assertNotIn("Old second.", spoken)
         self.assertIn("New answer.", spoken)
+        self.assertEqual(
+            [(turn.user, turn.assistant) for turn in state.conversation_turns],
+            [("new question", "New answer.")],
+        )
+        remembered_events = [event for event in log.events if event[0] == "conversation_turn"]
+        self.assertEqual(
+            remembered_events,
+            [
+                (
+                    "conversation_turn",
+                    {"user": "new question", "assistant": "New answer."},
+                )
+            ],
+        )
         self.assertIn(
             "stale_response_cancelled",
             [event["event"] for event in state.debug_snapshot()["events"]],
         )
+
+    def test_wake_acknowledgement_is_not_conversation_memory(self) -> None:
+        state = State()
+        log = RecordingLog()
+        voice = RecordingGenerationVoice()
+        worker = ConversationWorker(
+            {"personas": {"friendly": "Warm."}},
+            {"neutral": {}},
+            state,
+            log,
+            ImmediateClient(),
+            voice,
+        )
+        worker.start()
+        worker.submit("")
+        worker.close()
+
+        self.assertEqual(state.conversation_turns, [])
+        self.assertEqual(
+            [event for event in log.events if event[0] == "conversation_turn"],
+            [],
+        )
+        self.assertEqual([text for _, text in voice.clauses], ["Yeah?"])
 
     def test_pending_request_skips_old_mood_classification(self) -> None:
         client = QueueClient()

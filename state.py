@@ -13,6 +13,13 @@ from dataclasses import dataclass, field
 from typing import Iterator
 
 
+@dataclass(frozen=True)
+class ConversationTurn:
+    timestamp: float
+    user: str
+    assistant: str
+
+
 @dataclass
 class State:
     # identity
@@ -31,6 +38,9 @@ class State:
     last_seen: float | None = None
     active_window: str = ""
     objects: list[str] = field(default_factory=list)
+
+    # short-term memory
+    conversation_turns: list[ConversationTurn] = field(default_factory=list)
 
     # runtime
     listening: bool = False

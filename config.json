@@ -11,6 +11,10 @@
     "num_predict": 80,
     "keep_alive": -1
   },
+  "memory": {
+    "short_term_minutes": 10,
+    "short_term_turns": 8
+  },
   "vision": {
     "model": "llava:7b",
     "max_frame_px": 512
