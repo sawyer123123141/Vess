@@ -48,3 +48,15 @@ class State:
     def locked(self) -> Iterator["State"]:
         with self.lock:
             yield self
+
+    def expire_mood(self, now: float) -> tuple[str, float] | None:
+        """Return an expired mood to neutral and report the transition."""
+        with self.locked():
+            if self.mood == "neutral" or self.mood_until <= 0.0 or now < self.mood_until:
+                return None
+
+            previous_mood = self.mood
+            previous_until = self.mood_until
+            self.mood = "neutral"
+            self.mood_until = 0.0
+            return previous_mood, previous_until

@@ -32,6 +32,14 @@ class ColorOverrideTests(unittest.TestCase):
             (12.0, 34.0, 56.0),
         )
 
+    def test_expire_mood_restores_true_neutral_state(self) -> None:
+        state = State(mood="annoyed", mood_until=100.0)
+
+        transition = state.expire_mood(100.1)
+
+        self.assertEqual(transition, ("annoyed", 100.0))
+        self.assertEqual((state.mood, state.mood_until), ("neutral", 0.0))
+
 
 def _load_moods() -> dict:
     root = Path(__file__).resolve().parents[1]
