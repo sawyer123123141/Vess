@@ -1,9 +1,13 @@
 """Headless behavior verification harness regressions."""
 
 import json
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
+from PIL import Image
 
 from performance import PerformanceCue
 from state import State
@@ -18,8 +22,11 @@ from tools.render_behavior_preview import (
     build_summary,
     calculate_metrics,
     check_invariants,
+    run_verification,
     simulate_scenario,
     verify_determinism,
+    write_preview,
+    write_trace,
 )
 
 
@@ -120,6 +127,85 @@ class BehaviorVerificationTests(unittest.TestCase):
         self.assertIn("frame 143", summary)
         self.assertIn("gaze bounds", summary)
         self.assertIn("-1.083", summary)
+
+    def test_write_trace_uses_schema_v1_and_real_trace(self) -> None:
+        result = simulate_scenario("priority_conflicts", fps=30, seed=1)
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_trace(result, Path(directory))
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["fps"], 30)
+        self.assertEqual(payload["seed"], 1)
+        self.assertEqual(payload["scenario"], "priority_conflicts")
+        self.assertEqual(payload["frames"], result.trace)
+
+    def test_preview_encoder_receives_real_animator_frame(self) -> None:
+        result = simulate_scenario("conversational_cycle", fps=30, seed=1)
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("PIL.Image.fromarray", wraps=Image.fromarray) as fromarray:
+                write_preview(result, Path(directory), sample_every=30, scale=2)
+
+        np.testing.assert_array_equal(
+            fromarray.call_args_list[0].args[0],
+            result.frames[0],
+        )
+
+    def test_run_verification_writes_mobile_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            code, summary = run_verification(
+                scenarios=("priority_conflicts",),
+                seed=1,
+                fps=30,
+                output_dir=output,
+            )
+
+            self.assertEqual(code, 0)
+            self.assertIn("Vess behavior verification", summary)
+            self.assertTrue((output / "preview.gif").is_file())
+            self.assertTrue((output / "trace.json").is_file())
+            self.assertTrue((output / "summary.txt").is_file())
+
+    def test_run_verification_returns_one_on_hard_failure(self) -> None:
+        failure = VerificationFailure(
+            scenario="priority_conflicts",
+            phase="tracking",
+            frame=10,
+            time_seconds=10 / 30,
+            invariant="gaze bounds",
+            observed={"gaze_x": 2.0},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "tools.render_behavior_preview.check_invariants",
+                return_value=[failure],
+            ):
+                code, summary = run_verification(
+                    scenarios=("priority_conflicts",),
+                    output_dir=Path(directory),
+                )
+
+        self.assertEqual(code, 1)
+        self.assertIn("gaze bounds", summary)
+
+    def test_run_verification_returns_two_on_harness_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            with patch(
+                "tools.render_behavior_preview.simulate_scenario",
+                side_effect=ValueError("bad scenario"),
+            ):
+                code, summary = run_verification(
+                    scenarios=("broken",),
+                    output_dir=output,
+                )
+
+            saved = (output / "summary.txt").read_text(encoding="utf-8")
+
+        self.assertEqual(code, 2)
+        self.assertIn("HARNESS ERROR", summary)
+        self.assertIn("bad scenario", saved)
 
 
 if __name__ == "__main__":
