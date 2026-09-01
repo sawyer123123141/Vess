@@ -50,7 +50,17 @@ jobs:
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
           exit 0
 
-      - name: Add behavior summary
+      - name: Run comprehensive eye validation
+        id: eye_validation
+        shell: bash
+        run: |
+          set +e
+          python tools/render_eye_validation.py
+          code=$?
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Add behavior summaries
         if: always()
         shell: bash
         run: |
@@ -58,6 +68,12 @@ jobs:
             cat artifacts/behavior-verification/summary.txt >> "$GITHUB_STEP_SUMMARY"
           else
             echo "Behavior verification produced no summary." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f artifacts/behavior-verification/eye_validation_summary.txt ]; then
+            cat artifacts/behavior-verification/eye_validation_summary.txt >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Eye validation produced no summary." >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Upload behavior artifacts
@@ -68,12 +84,19 @@ jobs:
           path: artifacts/behavior-verification/
           if-no-files-found: warn
 
-      - name: Fail on behavior verification error
+      - name: Fail on verification error
         if: always()
         shell: bash
         run: |
-          code="${{ steps.behavior.outputs.exit_code }}"
-          if [ -z "$code" ]; then
-            code=2
+          behavior_code="${{ steps.behavior.outputs.exit_code }}"
+          eye_code="${{ steps.eye_validation.outputs.exit_code }}"
+          if [ -z "$behavior_code" ]; then
+            behavior_code=2
           fi
-          exit "$code"
+          if [ -z "$eye_code" ]; then
+            eye_code=2
+          fi
+          if [ "$behavior_code" -ne 0 ]; then
+            exit "$behavior_code"
+          fi
+          exit "$eye_code"
