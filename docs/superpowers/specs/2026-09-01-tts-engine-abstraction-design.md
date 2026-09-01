@@ -106,7 +106,9 @@ class TTSEngine(Protocol):
         ...
 ```
 
-V1 deliberately omits lifecycle methods unless implementation proves they are needed. Model construction occurs through the engine factory and an engine may lazily load internal resources on first synthesis.
+V1 deliberately omits lifecycle methods unless implementation proves they are needed.
+
+Engine objects must be cheap to construct. The factory must not initialize heavyweight model or pipeline state. Heavy model initialization occurs lazily on the first `synthesize` call, which runs on the existing `voice-synthesis` worker thread. This preserves the current nonblocking startup behavior and keeps model construction off the main thread.
 
 ## File Boundaries
 
@@ -137,7 +139,7 @@ Contains only lightweight shared types such as `SynthesisResult` and `TTSEngine`
 
 ### `output/tts/factory.py`
 
-Reads `voice.engine` and creates the requested engine.
+Reads `voice.engine` and creates the requested lightweight engine object.
 
 Initial accepted names:
 
@@ -145,6 +147,8 @@ Initial accepted names:
 - `chatterbox_turbo`
 
 Unknown values raise a clear configuration error. There is no silent fallback.
+
+The factory may select/import an adapter module, but must not initialize the underlying model. Model initialization is deferred until that engine's first `synthesize` call on the synthesis worker.
 
 ### `output/tts/kokoro.py`
 
@@ -157,11 +161,13 @@ It continues to use:
 
 It returns Kokoro's actual sample rate in `SynthesisResult`.
 
+The `KPipeline` is constructed lazily inside the engine on first synthesis, preserving the current worker-thread initialization behavior.
+
 ### `output/tts/chatterbox_turbo.py`
 
-Contains all Chatterbox-specific imports and behavior.
+Contains all Chatterbox-specific behavior.
 
-The module may be imported safely, but heavyweight package/model loading occurs only when the engine is selected and constructed or first used.
+Importing the adapter module itself must not require the Chatterbox package to be installed. Chatterbox package imports and heavyweight model initialization occur inside the engine's lazy loader when Chatterbox is actually selected and first synthesized.
 
 The adapter must be optional. A Kokoro installation and CI environment must not require Chatterbox dependencies.
 
@@ -270,7 +276,9 @@ The engine owns cached conditioning state because it is model-specific. `VoiceOu
 
 Selecting Kokoro must not import or initialize Chatterbox.
 
-Selecting Chatterbox when its dependency is unavailable must raise a clear error naming the selected engine and missing requirement.
+Selecting Chatterbox may create a lightweight adapter object at startup, but the Chatterbox dependency/model is not loaded until first synthesis on the synthesis worker.
+
+If the Chatterbox dependency is unavailable, that first synthesis must fail clearly with an error naming the selected engine and missing requirement.
 
 ### No silent fallback
 
@@ -411,6 +419,7 @@ Verify:
 - `chatterbox_turbo` selects `ChatterboxTurboEngine`
 - unknown engine names fail clearly
 - selecting Kokoro does not require/import Chatterbox runtime dependencies
+- constructing an engine through the factory does not initialize its heavyweight model
 
 ### Voice pipeline regressions
 
@@ -458,6 +467,7 @@ Rollback of Chatterbox should therefore mean selecting/removing that adapter, no
 The design is successful when:
 
 - `VoiceOutput` contains no direct Kokoro/Chatterbox model construction
+- heavyweight TTS model initialization remains on the synthesis worker, not the main thread
 - Kokoro remains the default and passes all existing voice behavior tests
 - engine sample rate travels with each synthesized waveform
 - `PerformanceCue` reaches the selected engine
