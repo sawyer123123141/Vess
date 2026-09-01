@@ -20,6 +20,17 @@
     "device": "cpu",
     "compute_type": "int8"
   },
+  "audio": {
+    "device": null,
+    "sample_rate": 16000,
+    "channels": 1,
+    "vad_threshold": 0.015,
+    "min_utterance_seconds": 0.25,
+    "silence_seconds": 0.8,
+    "max_utterance_seconds": 15.0,
+    "wake_variants": ["hey vess", "hey best", "hey guess", "heaviest"],
+    "wake_max_distance": 2
+  },
   "voice": {
     "engine": "kokoro",
     "name": "af_heart",

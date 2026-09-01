@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import ceil
+import queue
+import threading
+from typing import Any, Callable
 
 import numpy as np
 
@@ -66,6 +69,135 @@ class UtteranceAssembler:
         return utterance
 
 
+class AudioLoop:
+    """Capture utterances and dispatch only fuzzy wake-phrase requests."""
+
+    def __init__(
+        self,
+        config: dict[str, Any],
+        state: Any,
+        event_log: Any,
+        on_request: Callable[[str], None],
+        transcribe: Callable[[np.ndarray], str] | None = None,
+    ) -> None:
+        settings = config.get("audio", {})
+        self._config = config
+        self._state = state
+        self._event_log = event_log
+        self._on_request = on_request
+        self._transcribe = transcribe
+        self._variants = list(settings.get("wake_variants", ["hey vess"]))
+        self._max_distance = int(settings.get("wake_max_distance", 2))
+        self._blocks: queue.Queue[np.ndarray | None] = queue.Queue(maxsize=16)
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._stream: Any = None
+        self._assembler = UtteranceAssembler(
+            int(settings.get("sample_rate", 16_000)),
+            float(settings.get("vad_threshold", 0.015)),
+            float(settings.get("min_utterance_seconds", 0.25)),
+            float(settings.get("silence_seconds", 0.8)),
+            float(settings.get("max_utterance_seconds", 15.0)),
+        )
+
+    def handle_utterance(self, samples: np.ndarray) -> None:
+        """Transcribe one utterance and either log rejection or dispatch it."""
+        with self._state.locked():
+            self._state.listening = True
+        try:
+            if self._transcribe is None:
+                raise RuntimeError("audio loop was not started")
+            transcript = self._transcribe(samples).strip()
+        except Exception as error:
+            self._event_log.append("audio_error", {"error": str(error)})
+            return
+        finally:
+            with self._state.locked():
+                self._state.listening = False
+
+        closest = match_wake_phrase(transcript, self._variants, 1_000_000)
+        accepted = (
+            closest if closest is not None and closest.distance <= self._max_distance else None
+        )
+        payload = _wake_payload(transcript, closest)
+        if accepted is None:
+            self._event_log.append("wake_rejected", payload)
+            return
+
+        self._event_log.append("wake_accepted", payload)
+        request = " ".join(transcript.split()[accepted.consumed_words:])
+        self._on_request(request)
+
+    def start(self) -> None:
+        """Open the microphone and begin processing queued audio blocks."""
+        if self._thread is not None:
+            return
+
+        settings = self._config.get("audio", {})
+        try:
+            import sounddevice as sound_device
+
+            self._stream = sound_device.InputStream(
+                device=settings.get("device"),
+                samplerate=int(settings.get("sample_rate", 16_000)),
+                channels=int(settings.get("channels", 1)),
+                callback=self._on_audio,
+            )
+            self._stream.start()
+        except Exception as error:
+            if self._stream is not None:
+                self._stream.close()
+                self._stream = None
+            raise RuntimeError(f"cannot open audio device: {error}") from error
+
+        self._thread = threading.Thread(
+            target=self._run,
+            name="audio-loop",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def close(self) -> None:
+        """Stop capture and wait for the audio worker to exit."""
+        self._stop.set()
+        if self._stream is not None:
+            self._stream.stop()
+            self._stream.close()
+            self._stream = None
+        if self._thread is not None:
+            try:
+                self._blocks.put_nowait(None)
+            except queue.Full:
+                pass
+            self._thread.join()
+            self._thread = None
+
+    def _on_audio(self, indata: np.ndarray, *_: object) -> None:
+        try:
+            self._blocks.put_nowait(indata[:, 0].copy())
+        except queue.Full:
+            pass
+
+    def _run(self) -> None:
+        if self._transcribe is None:
+            try:
+                self._transcribe = _make_transcriber(self._config)
+            except Exception as error:
+                self._event_log.append("audio_error", {"error": str(error)})
+                return
+        while not self._stop.is_set():
+            block = self._blocks.get()
+            if block is None:
+                return
+            with self._state.locked():
+                speaking = self._state.speaking
+            if speaking:
+                continue
+            utterance = self._assembler.push(block)
+            if utterance is not None:
+                self.handle_utterance(utterance)
+
+
 def match_wake_phrase(
     transcript: str,
     variants: list[str],
@@ -121,3 +253,31 @@ def _levenshtein(left: str, right: str) -> int:
             )
         previous = current
     return previous[-1]
+
+
+def _wake_payload(transcript: str, match: WakeMatch | None) -> dict[str, object]:
+    word_count = match.consumed_words if match is not None else 3
+    return {
+        "transcript": transcript,
+        "tested_prefix": " ".join(_normalise(transcript).split()[:word_count]),
+        "closest_variant": match.variant if match is not None else None,
+        "distance": match.distance if match is not None else None,
+    }
+
+
+def _make_transcriber(config: dict[str, Any]) -> Callable[[np.ndarray], str]:
+    """Create the local CPU/int8 Whisper transcriber only for live capture."""
+    from faster_whisper import WhisperModel
+
+    settings = config.get("whisper", {})
+    model = WhisperModel(
+        settings.get("model", "small"),
+        device=settings.get("device", "cpu"),
+        compute_type=settings.get("compute_type", "int8"),
+    )
+
+    def transcribe(samples: np.ndarray) -> str:
+        segments, _ = model.transcribe(samples)
+        return " ".join(segment.text.strip() for segment in segments).strip()
+
+    return transcribe

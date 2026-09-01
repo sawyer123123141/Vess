@@ -4,7 +4,21 @@ import unittest
 
 import numpy as np
 
-from perception.audio import WakeMatch, UtteranceAssembler, match_wake_phrase
+from perception.audio import (
+    AudioLoop,
+    UtteranceAssembler,
+    WakeMatch,
+    match_wake_phrase,
+)
+from state import State
+
+
+CONFIG = {
+    "audio": {
+        "wake_variants": ["hey vess"],
+        "wake_max_distance": 2,
+    }
+}
 
 
 class WakeMatchTests(unittest.TestCase):
@@ -28,6 +42,48 @@ class UtteranceAssemblerTests(unittest.TestCase):
         self.assertTrue(
             np.array_equal(assembler.push(np.zeros(3)), np.array([0.2, 0.2]))
         )
+
+
+class AudioLoopTests(unittest.TestCase):
+    def test_rejection_logs_without_dispatch(self) -> None:
+        dispatched: list[str] = []
+        log = RecordingLog()
+        loop = AudioLoop(
+            CONFIG,
+            State(),
+            log,
+            dispatched.append,
+            transcribe=lambda _: "turn on the lights",
+        )
+
+        loop.handle_utterance(np.ones(16_000, dtype=np.float32))
+
+        self.assertEqual(dispatched, [])
+        self.assertEqual(log.events[0][0], "wake_rejected")
+
+    def test_acceptance_removes_matched_wake_prefix_before_dispatch(self) -> None:
+        dispatched: list[str] = []
+        log = RecordingLog()
+        loop = AudioLoop(
+            CONFIG,
+            State(),
+            log,
+            dispatched.append,
+            transcribe=lambda _: "Hey best tell me a joke",
+        )
+
+        loop.handle_utterance(np.ones(16_000, dtype=np.float32))
+
+        self.assertEqual(dispatched, ["tell me a joke"])
+        self.assertEqual(log.events[0][0], "wake_accepted")
+
+
+class RecordingLog:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict[str, object]]] = []
+
+    def append(self, event_type: str, payload: dict[str, object]) -> None:
+        self.events.append((event_type, payload))
 
 if __name__ == "__main__":
     unittest.main()
