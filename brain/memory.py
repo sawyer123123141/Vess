@@ -24,10 +24,18 @@ def append_conversation_turn(
     timestamp: float | None = None,
     max_age_seconds: float,
     max_turns: int,
+    status: str = "completed",
+    interrupted_clause: str | None = None,
 ) -> ConversationTurn:
-    """Store one completed exchange and keep short-term history bounded."""
+    """Store one delivered exchange and keep short-term history bounded."""
     now = time.time() if timestamp is None else float(timestamp)
-    turn = ConversationTurn(now, user, assistant)
+    turn = ConversationTurn(
+        now,
+        user,
+        assistant,
+        status=status,
+        interrupted_clause=interrupted_clause,
+    )
     with state.locked():
         state.conversation_turns.append(turn)
         _prune_turns_locked(
