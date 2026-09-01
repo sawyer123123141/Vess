@@ -5,9 +5,11 @@ import unittest
 import numpy as np
 
 from brain.llm import split_clauses
+from output.tts.base import SynthesisResult
 from output.voice import VoiceOutput
 from performance import PerformanceCue, load_performance_definitions
 from state import State
+from tests.tts_fakes import FakeTTSEngine
 
 
 class RecordingLog:
@@ -35,11 +37,17 @@ class PerformanceFlowTests(unittest.TestCase):
         def play(audio: np.ndarray, sample_rate: int) -> None:
             self.assertEqual(state.performance.expression, "playful")
 
+        engine = FakeTTSEngine(
+            lambda text, performance: SynthesisResult(
+                np.ones(20, dtype=np.float32),
+                1_000,
+            )
+        )
         voice = VoiceOutput(
             {"voice": {"sample_rate": 1_000}},
             state,
             RecordingLog(),
-            synthesize=lambda text: np.ones(20, dtype=np.float32),
+            engine=engine,
             play=play,
         )
         voice.start()
@@ -51,6 +59,7 @@ class PerformanceFlowTests(unittest.TestCase):
         )
         voice.close()
 
+        self.assertEqual(engine.calls, [(clause.text, clause.performance)])
         self.assertEqual(state.performance, PerformanceCue())
         snapshot = state.debug_snapshot()
         self.assertEqual(snapshot["values"]["performance_expression"], "neutral")
