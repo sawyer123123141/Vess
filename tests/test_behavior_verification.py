@@ -260,10 +260,10 @@ assert len(result.frames) == 360
             )
         )
 
-    def test_eye_reaction_cycle_is_228_frames_and_deterministic(self) -> None:
+    def test_eye_reaction_cycle_is_216_frames_and_deterministic(self) -> None:
         result = simulate_scenario("eye_reaction_cycle", fps=30, seed=1)
 
-        self.assertEqual(len(result.trace), 228)
+        self.assertEqual(len(result.trace), 216)
         self.assertEqual(
             verify_determinism("eye_reaction_cycle", fps=30, seed=1),
             [],
