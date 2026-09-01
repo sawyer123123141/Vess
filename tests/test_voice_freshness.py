@@ -111,13 +111,30 @@ class RecordingGenerationVoice:
     def __init__(self) -> None:
         self.clauses: list[tuple[int | None, str]] = []
         self.first_clause = threading.Event()
+        self.delivery_callback = None
 
     def begin_generation(self, generation_id: int) -> None:
-        pass
+        return None
 
     def enqueue(self, text: str, generation_id: int | None = None) -> None:
         self.clauses.append((generation_id, text))
         self.first_clause.set()
+        if generation_id is not None and self.delivery_callback is not None:
+            self.delivery_callback(
+                "clause_started",
+                {"generation_id": generation_id, "text": text},
+            )
+            self.delivery_callback(
+                "clause_completed",
+                {"generation_id": generation_id, "text": text},
+            )
+
+    def finish_generation(self, generation_id: int) -> None:
+        if self.delivery_callback is not None:
+            self.delivery_callback(
+                "generation_playback_drained",
+                {"generation_id": generation_id},
+            )
 
     def enqueue_acknowledgement(self, generation_id: int | None = None) -> None:
         self.clauses.append((generation_id, "Yeah?"))
@@ -192,6 +209,7 @@ class ConversationFreshnessTests(unittest.TestCase):
             ImmediateClient(),
             voice,
         )
+        voice.delivery_callback = worker.handle_delivery
         worker.start()
         worker.submit("Tell me something")
         worker.close()
@@ -243,6 +261,7 @@ class ConversationFreshnessTests(unittest.TestCase):
             SwitchingClient(),
             voice,
         )
+        voice.delivery_callback = worker.handle_delivery
         worker.start()
         worker.submit("old question")
         self.assertTrue(voice.first_clause.wait(timeout=0.5))
