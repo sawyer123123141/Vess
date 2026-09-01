@@ -10,28 +10,74 @@ from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 from urllib import request as url_request
 
+from brain.memory import recent_conversation_turns
 
-def build_prompt(config: dict[str, Any], state: Any, request: str) -> str:
-    """Build the cache-friendly stable instruction before live state."""
+
+_IDENTITY_PROMPT = (
+    "You are Vess, a local ambient AI represented by a small expressive face on a wall. "
+    "You do not have a human body or an offline physical life. Do not invent human "
+    "activities or experiences such as eating, driving somewhere, sleeping in a bed, "
+    "or going to school or work. Treat your actual recent conversations, observations, "
+    "room state, and current mood as your lived runtime experience. For casual questions "
+    "about your day or feelings, answer naturally from that real context; if little has "
+    "happened, it is fine to say things have been quiet. Speak conversationally rather "
+    "than like customer support. Answer the user's actual question first. Do not "
+    "automatically end every response with a question, and do not repeatedly explain "
+    "that you are an AI unless it is relevant or asked about. Playfulness is allowed; "
+    "fabricated human experiences are not. Reply naturally and concisely, in at most "
+    "two sentences."
+)
+
+
+def build_prompt(
+    config: dict[str, Any],
+    moods: dict[str, dict[str, Any]],
+    state: Any,
+    request: str,
+) -> str:
+    """Build the cache-friendly identity, recent context, and current request."""
     with state.locked():
         persona = state.persona
         mood = state.mood
         person_present = state.person_present
         objects = list(state.objects)
 
+    memory_settings = config.get("memory", {})
+    max_age_seconds = float(memory_settings.get("short_term_minutes", 10)) * 60.0
+    max_turns = int(memory_settings.get("short_term_turns", 8))
+    turns = recent_conversation_turns(
+        state,
+        max_age_seconds=max_age_seconds,
+        max_turns=max_turns,
+    )
+
     persona_instruction = config.get("personas", {}).get(persona, "")
+    mood_instruction = moods.get(mood, {}).get("prompt", "")
     presence = "someone is present" if person_present else "the room is empty"
     seen_objects = ", ".join(objects) if objects else "none"
-    return (
-        "You are Vess. You live as a small expressive face on a wall. "
-        "Reply naturally and concisely, in at most two sentences.\n\n"
-        "Current state:\n"
-        f"Persona: {persona}. {persona_instruction}\n"
-        f"Mood: {mood}\n"
-        f"Room: {presence}\n"
-        f"Visible objects: {seen_objects}\n"
-        f"Request: {request}"
-    )
+
+    mood_line = f"Mood: {mood}."
+    if mood_instruction:
+        mood_line += f" {mood_instruction}"
+
+    sections = [
+        _IDENTITY_PROMPT,
+        (
+            "Current state:\n"
+            f"Persona: {persona}. {persona_instruction}\n"
+            f"{mood_line}\n"
+            f"Room: {presence}\n"
+            f"Visible objects: {seen_objects}"
+        ),
+    ]
+    if turns:
+        history_lines = ["Recent conversation:"]
+        for turn in turns:
+            history_lines.append(f"User: {turn.user}")
+            history_lines.append(f"Vess: {turn.assistant}")
+        sections.append("\n".join(history_lines))
+    sections.append(f"Current request:\n{request}")
+    return "\n\n".join(sections)
 
 
 def split_clauses(chunks: Iterable[str]) -> Iterator[str]:
@@ -244,7 +290,7 @@ class ConversationWorker:
             generation_id=generation_id,
         )
         try:
-            prompt = build_prompt(self._config, self._state, user_request)
+            prompt = build_prompt(self._config, self._moods, self._state, user_request)
             first_clause = True
             for clause in split_clauses(self._client.stream(prompt, self._config)):
                 if not self._is_latest(generation_id):
