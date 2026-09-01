@@ -25,3 +25,4 @@ local_config.json
 .env
 
 artifacts/behavior-verification/
+artifacts/tts-benchmark/
