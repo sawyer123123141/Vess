@@ -87,7 +87,7 @@ class UtteranceAssembler:
 
     def _finish(self) -> np.ndarray | None:
         final_index = len(self._samples) - self._trailing_quiet
-        utterance = np.asarray(self._samples[:final_index])
+        utterance = np.asarray(self._samples[:final_index], dtype=np.float32)
         self._samples = []
         self._trailing_quiet = 0
         if len(utterance) < self._min_samples:
