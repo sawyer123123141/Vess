@@ -22,16 +22,19 @@ PERFORMANCES = load_performance_definitions({
     "playful": {
         "intensity": 0.65,
         "shape": {"l_h": -0.5, "r_h": 0.3, "l_slant": 0.7, "r_slant": -0.35},
+        "eye_motion": {"l_x": -0.18, "l_y": 0.22, "r_x": 0.30, "r_y": -0.62, "reaction": 0.80},
         "movement": {"hold_scale": 0.75, "ease_scale": 0.85, "speaking_break_scale": 1.4},
     },
     "emphatic": {
         "intensity": 0.7,
         "shape": {"l_h": 1.2, "r_h": 1.0},
+        "eye_motion": {"l_x": 0.0, "l_y": -0.32, "r_x": 0.0, "r_y": -0.27, "reaction": 0.55},
         "movement": {"track_bias_scale": 1.15, "speaking_break_scale": 0.4},
     },
     "thoughtful": {
         "intensity": 0.55,
         "shape": {"l_h": -0.5, "r_h": -0.4},
+        "eye_motion": {"l_x": 0.0, "l_y": -0.16, "r_x": 0.0, "r_y": -0.24, "reaction": 0.20},
         "movement": {"hold_scale": 1.4, "ease_scale": 1.2, "gaze_y_bias": -0.22},
     },
 })
@@ -166,6 +169,114 @@ class AnimatorTests(unittest.TestCase):
 
         self.assertNotEqual(fresh["shape"]["l_h"], 999.0)
         self.assertNotEqual(fresh["performance_current"]["hold_scale"], 999.0)
+
+    def test_thinking_mode_adds_asymmetric_eye_body_lift(self) -> None:
+        animator = FaceAnimator(MOODS, PERFORMANCES, seed=1)
+        state = State(thinking=True, performance=PerformanceCue())
+        for _ in range(20):
+            animator.tick(state, 1 / 30)
+
+        snap = animator.debug_snapshot()
+        self.assertAlmostEqual(snap["left_eye_settled_target"][1], -0.12, places=6)
+        self.assertAlmostEqual(snap["right_eye_settled_target"][1], -0.22, places=6)
+
+    def test_non_neutral_performance_reacts_then_settles(self) -> None:
+        animator = FaceAnimator(MOODS, PERFORMANCES, seed=1)
+        state = State(performance=PerformanceCue("playful", 0.65))
+
+        animator.tick(state, 1 / 30)
+        first = animator.debug_snapshot()
+        self.assertEqual(first["reaction_phase"], "entry")
+
+        for _ in range(12):
+            animator.tick(state, 1 / 30)
+        settled = animator.debug_snapshot()
+        self.assertEqual(settled["reaction_phase"], "hold")
+        self.assertAlmostEqual(
+            settled["left_eye_offset"][0],
+            settled["left_eye_settled_target"][0],
+            delta=0.03,
+        )
+
+    def test_release_to_neutral_has_no_overshoot_and_returns_to_mode_target(self) -> None:
+        animator = FaceAnimator(MOODS, PERFORMANCES, seed=1)
+        state = State(performance=PerformanceCue("playful", 0.65))
+        for _ in range(12):
+            animator.tick(state, 1 / 30)
+
+        state.performance = PerformanceCue()
+        previous_distance = None
+        for _ in range(8):
+            animator.tick(state, 1 / 30)
+            snap = animator.debug_snapshot()
+            left = snap["left_eye_offset"]
+            target = snap["left_eye_settled_target"]
+            distance = abs(left[0] - target[0]) + abs(left[1] - target[1])
+            if previous_distance is not None:
+                self.assertLessEqual(distance, previous_distance + 1e-6)
+            previous_distance = distance
+
+        final = animator.debug_snapshot()
+        self.assertEqual(final["reaction_phase"], "hold")
+        self.assertAlmostEqual(final["left_eye_offset"][0], 0.0, delta=1e-6)
+        self.assertAlmostEqual(final["left_eye_offset"][1], 0.0, delta=1e-6)
+
+    def test_direct_cue_change_starts_from_current_without_neutral_frame(self) -> None:
+        animator = FaceAnimator(MOODS, PERFORMANCES, seed=1)
+        state = State(performance=PerformanceCue("playful", 0.65))
+        for _ in range(5):
+            animator.tick(state, 1 / 30)
+        before = animator.debug_snapshot()["left_eye_offset"]
+
+        state.performance = PerformanceCue("emphatic", 0.70)
+        animator.tick(state, 1 / 30)
+        after = animator.debug_snapshot()
+
+        self.assertEqual(after["reaction_phase"], "entry")
+        self.assertNotEqual(after["left_eye_settled_target"], (0.0, 0.0))
+        self.assertLess(
+            abs(after["left_eye_offset"][0] - before[0])
+            + abs(after["left_eye_offset"][1] - before[1]),
+            0.5,
+        )
+
+    def test_same_expression_intensity_change_does_not_restart_reaction(self) -> None:
+        animator = FaceAnimator(MOODS, PERFORMANCES, seed=1)
+        state = State(performance=PerformanceCue("playful", 0.65))
+        for _ in range(12):
+            animator.tick(state, 1 / 30)
+        self.assertEqual(animator.debug_snapshot()["reaction_phase"], "hold")
+
+        state.performance = PerformanceCue("playful", 0.30)
+        animator.tick(state, 1 / 30)
+        self.assertNotEqual(animator.debug_snapshot()["reaction_phase"], "entry")
+
+    def test_blink_does_not_reset_eye_motion(self) -> None:
+        animator = FaceAnimator(MOODS, PERFORMANCES, seed=1)
+        state = State(performance=PerformanceCue("playful", 0.65))
+        for _ in range(12):
+            animator.tick(state, 1 / 30)
+        before = animator.debug_snapshot()["left_eye_offset"]
+
+        animator.blink_phase = 0.1
+        animator.tick(state, 1 / 30)
+        after = animator.debug_snapshot()["left_eye_offset"]
+
+        self.assertLess(
+            abs(after[0] - before[0]) + abs(after[1] - before[1]),
+            0.15,
+        )
+
+    def test_unknown_performance_does_not_start_eye_reaction(self) -> None:
+        animator = FaceAnimator(MOODS, PERFORMANCES, seed=1)
+        state = State(performance=PerformanceCue("made_up", 1.0))
+
+        animator.tick(state, 1 / 30)
+        snap = animator.debug_snapshot()
+
+        self.assertEqual(snap["reaction_phase"], "hold")
+        self.assertEqual(snap["left_eye_settled_target"], (0.0, 0.0))
+        self.assertEqual(snap["right_eye_settled_target"], (0.0, 0.0))
 
 
 if __name__ == "__main__":
