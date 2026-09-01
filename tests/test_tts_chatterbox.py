@@ -26,6 +26,10 @@ class FakeModel:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
+        self.conditioning_calls: list[str] = []
+
+    def prepare_conditionals(self, audio_prompt_path: str) -> None:
+        self.conditioning_calls.append(audio_prompt_path)
 
     def generate(self, text: str, **kwargs: object) -> FakeTensor:
         self.calls.append((text, kwargs))
@@ -85,7 +89,7 @@ class ChatterboxTurboEngineTests(unittest.TestCase):
         self.assertEqual(first.sample_rate, 24_000)
         self.assertEqual(second.sample_rate, 24_000)
 
-    def test_reference_audio_is_forwarded_to_generate(self) -> None:
+    def test_reference_audio_is_conditioned_once_and_reused(self) -> None:
         with patch.dict(sys.modules, fake_chatterbox_modules()):
             from output.tts.chatterbox_turbo import ChatterboxTurboEngine
 
@@ -100,10 +104,12 @@ class ChatterboxTurboEngineTests(unittest.TestCase):
                 }
             )
             engine.synthesize("hello", PerformanceCue())
+            engine.synthesize("again", PerformanceCue("curious", 0.4))
 
+        self.assertEqual(FakeTurboTTS.model.conditioning_calls, ["voice.wav"])
         self.assertEqual(
             FakeTurboTTS.model.calls,
-            [("hello", {"audio_prompt_path": "voice.wav"})],
+            [("hello", {}), ("again", {})],
         )
 
     def test_output_is_flat_float32_and_uses_model_sample_rate(self) -> None:
