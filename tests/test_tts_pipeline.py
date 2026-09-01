@@ -215,6 +215,98 @@ class TtsPipelineTests(unittest.TestCase):
         self.assertEqual(event["leading_silence_ms"], 20.0)
         self.assertEqual(event["trailing_silence_ms"], 30.0)
 
+    def test_excess_edge_silence_is_trimmed_to_safety_margins(self) -> None:
+        state = State()
+        played: list[np.ndarray] = []
+
+        def synthesize(text: str) -> np.ndarray:
+            return np.concatenate(
+                [
+                    np.zeros(330, dtype=np.float32),
+                    np.ones(50, dtype=np.float32),
+                    np.zeros(480, dtype=np.float32),
+                ]
+            )
+
+        voice = VoiceOutput(
+            {"voice": {"sample_rate": 1_000}},
+            state,
+            RecordingLog(),
+            synthesize=synthesize,
+            play=lambda audio, sample_rate: played.append(audio.copy()),
+        )
+        voice.start()
+        voice.begin_generation(1)
+        voice.enqueue("trimmed", generation_id=1)
+        voice.close()
+
+        self.assertEqual(len(played), 1)
+        self.assertEqual(played[0].size, 310)
+        playback_event = next(
+            event
+            for event in state.debug_snapshot()["events"]
+            if event["event"] == "tts_playback_started"
+        )
+        self.assertEqual(playback_event["raw_leading_silence_ms"], 330.0)
+        self.assertEqual(playback_event["raw_trailing_silence_ms"], 480.0)
+        self.assertEqual(playback_event["leading_silence_ms"], 100.0)
+        self.assertEqual(playback_event["trailing_silence_ms"], 160.0)
+
+    def test_trimming_preserves_quiet_onset_inside_leading_safety_margin(self) -> None:
+        played: list[np.ndarray] = []
+        quiet_onset = np.full(80, 0.0005, dtype=np.float32)
+
+        def synthesize(text: str) -> np.ndarray:
+            return np.concatenate(
+                [
+                    np.zeros(300, dtype=np.float32),
+                    quiet_onset,
+                    np.ones(50, dtype=np.float32),
+                    np.zeros(300, dtype=np.float32),
+                ]
+            )
+
+        voice = VoiceOutput(
+            {"voice": {"sample_rate": 1_000}},
+            State(),
+            RecordingLog(),
+            synthesize=synthesize,
+            play=lambda audio, sample_rate: played.append(audio.copy()),
+        )
+        voice.start()
+        voice.begin_generation(1)
+        voice.enqueue("quiet onset", generation_id=1)
+        voice.close()
+
+        self.assertEqual(len(played), 1)
+        np.testing.assert_allclose(played[0][20:100], quiet_onset)
+        self.assertEqual(float(played[0][100]), 1.0)
+
+    def test_cached_acknowledgement_audio_is_not_trimmed(self) -> None:
+        played: list[np.ndarray] = []
+        acknowledgement = np.concatenate(
+            [
+                np.zeros(300, dtype=np.float32),
+                np.ones(1, dtype=np.float32),
+                np.zeros(400, dtype=np.float32),
+            ]
+        )
+
+        voice = VoiceOutput(
+            {"voice": {"sample_rate": 1_000}},
+            State(),
+            RecordingLog(),
+            synthesize=lambda text: acknowledgement.copy(),
+            play=lambda audio, sample_rate: played.append(audio.copy()),
+        )
+        voice.start()
+        voice.prepare_acknowledgement()
+        voice.enqueue_acknowledgement()
+        voice.close()
+
+        self.assertEqual(len(played), 1)
+        np.testing.assert_array_equal(played[0], acknowledgement)
+
 
 if __name__ == "__main__":
     unittest.main()
