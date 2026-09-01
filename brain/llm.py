@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib import request as url_request
 
+from brain.delivery import DeliveryLedger
 from brain.memory import append_conversation_turn, recent_conversation_turns
 from performance import PerformanceCue, cue_for_label
 
@@ -35,6 +36,9 @@ _HARD_CLAUSE_CHARS = 180
 _MIN_COMMA_CLAUSE_CHARS = 60
 _PERFORMANCE_PREFIX = "[[vess:"
 _STRONG_BOUNDARIES = ".!?\n"
+_INTERRUPTED_HISTORY_WARNING = (
+    "Vess had started another clause but was interrupted; do not assume the user heard all of it."
+)
 
 
 @dataclass(frozen=True)
@@ -93,7 +97,12 @@ def build_prompt(
         history_lines = ["Recent conversation:"]
         for turn in turns:
             history_lines.append(f"User: {turn.user}")
-            history_lines.append(f"Vess: {turn.assistant}")
+            if turn.status == "interrupted":
+                history_lines.append(f"Vess (interrupted): {turn.assistant}")
+                if turn.interrupted_clause is not None:
+                    history_lines.append(_INTERRUPTED_HISTORY_WARNING)
+            else:
+                history_lines.append(f"Vess: {turn.assistant}")
         sections.append("\n".join(history_lines))
     sections.append(f"Current request:\n{request}")
     return "\n\n".join(sections)
@@ -285,6 +294,7 @@ class ConversationWorker:
         self._event_log = event_log
         self._client = client
         self._voice = voice
+        self._delivery = DeliveryLedger(self._finalize_delivered_turn)
         self._requests: queue.Queue[tuple[int, str] | None] = queue.Queue(maxsize=1)
         self._request_lock = threading.Lock()
         self._next_generation = 0
@@ -346,6 +356,7 @@ class ConversationWorker:
             replacement_generation = self._next_generation
             self._latest_generation = replacement_generation
 
+        self._delivery.interrupt(expected_generation)
         self._voice.begin_generation(replacement_generation)
         payload = {
             "expected_generation": expected_generation,
@@ -356,6 +367,10 @@ class ConversationWorker:
         self._state.record_debug("generation_cancelled", **payload)
         self._state.update_debug(active_generation=replacement_generation)
         return True
+
+    def handle_delivery(self, event_type: str, payload: dict[str, object]) -> None:
+        """Forward physical voice lifecycle receipts into delivered-memory accounting."""
+        self._delivery.handle(event_type, payload)
 
     def close(self) -> None:
         if self._thread is None:
@@ -390,6 +405,7 @@ class ConversationWorker:
                 self._voice.enqueue_acknowledgement(generation_id=generation_id)
             return
 
+        self._delivery.begin(generation_id, user_request)
         with self._state.locked():
             self._state.thinking = True
         llm_started_at = time.perf_counter()
@@ -407,7 +423,6 @@ class ConversationWorker:
                 performances=self._performances,
             )
             first_clause = True
-            spoken_clauses: list[str] = []
             for clause in split_clauses(
                 self._client.stream(prompt, self._config),
                 self._performances,
@@ -432,7 +447,7 @@ class ConversationWorker:
                         generation_id=generation_id,
                     )
                     first_clause = False
-                spoken_clauses.append(clause.text)
+                self._delivery.generated(generation_id, clause.text)
                 if self._performances is None:
                     self._voice.enqueue(clause.text, generation_id=generation_id)
                 else:
@@ -442,17 +457,15 @@ class ConversationWorker:
                         performance=clause.performance,
                     )
 
-            if not self._remember_completed_turn(
-                generation_id,
-                user_request,
-                spoken_clauses,
-            ):
+            if not self._is_latest(generation_id):
                 self._state.record_debug(
                     "stale_response_cancelled",
                     generation_id=generation_id,
                 )
                 return
 
+            self._delivery.llm_finished(generation_id)
+            self._voice.finish_generation(generation_id)
             self._state.record_debug("llm_complete", generation_id=generation_id)
             if self._has_pending_request():
                 self._state.record_debug(
@@ -468,36 +481,40 @@ class ConversationWorker:
             with self._state.locked():
                 self._state.thinking = False
 
-    def _remember_completed_turn(
+    def _finalize_delivered_turn(
         self,
         generation_id: int,
         user_request: str,
-        spoken_clauses: list[str],
-    ) -> bool:
-        assistant_response = " ".join(spoken_clauses).strip()
-        with self._request_lock:
-            if generation_id != self._latest_generation:
-                return False
-            if not assistant_response:
-                return True
+        assistant_response: str,
+        status: str,
+        interrupted_clause: str | None,
+    ) -> None:
+        if status == "completed" and not assistant_response:
+            return
 
-            max_age_seconds, max_turns = _memory_limits(self._config)
-            append_conversation_turn(
-                self._state,
-                user_request,
-                assistant_response,
-                max_age_seconds=max_age_seconds,
-                max_turns=max_turns,
-            )
-            self._event_log.append(
-                "conversation_turn",
-                {"user": user_request, "assistant": assistant_response},
-            )
+        max_age_seconds, max_turns = _memory_limits(self._config)
+        append_conversation_turn(
+            self._state,
+            user_request,
+            assistant_response,
+            max_age_seconds=max_age_seconds,
+            max_turns=max_turns,
+            status=status,
+            interrupted_clause=interrupted_clause,
+        )
+        payload: dict[str, object] = {
+            "user": user_request,
+            "assistant": assistant_response,
+        }
+        if status != "completed":
+            payload["status"] = status
+            if interrupted_clause is not None:
+                payload["interrupted_clause"] = interrupted_clause
+        self._event_log.append("conversation_turn", payload)
 
         with self._state.locked():
             remembered_turns = len(self._state.conversation_turns)
         self._state.update_debug(short_term_turns=remembered_turns)
-        return True
 
     def _is_latest(self, generation_id: int) -> bool:
         with self._request_lock:
