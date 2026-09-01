@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from math import ceil
 import queue
@@ -28,12 +29,16 @@ class UtteranceAssembler:
         min_utterance_seconds: float,
         silence_seconds: float,
         max_utterance_seconds: float,
+        pre_roll_seconds: float = 0.25,
     ) -> None:
         self._sample_rate = sample_rate
         self._threshold = threshold
         self._min_samples = ceil(sample_rate * min_utterance_seconds)
         self._silence_samples = ceil(sample_rate * silence_seconds)
         self._max_samples = ceil(sample_rate * max_utterance_seconds)
+        self._pre_roll: deque[float] = deque(
+            maxlen=max(ceil(sample_rate * pre_roll_seconds), 0)
+        )
         self._samples: list[float] = []
         self._trailing_quiet = 0
 
@@ -43,7 +48,10 @@ class UtteranceAssembler:
             amplitude = abs(float(sample))
             if not self._samples:
                 if amplitude < self._threshold:
+                    self._pre_roll.append(float(sample))
                     continue
+                self._samples.extend(self._pre_roll)
+                self._pre_roll.clear()
                 self._samples.append(sample)
                 self._trailing_quiet = 0
                 continue
@@ -106,6 +114,7 @@ class AudioLoop:
             float(settings.get("min_utterance_seconds", 0.25)),
             float(settings.get("silence_seconds", 0.8)),
             float(settings.get("max_utterance_seconds", 15.0)),
+            float(settings.get("pre_roll_seconds", 0.25)),
         )
 
     def handle_utterance(self, samples: np.ndarray) -> None:
