@@ -118,7 +118,8 @@ def build_prompt(
     if turns:
         history_lines = ["Recent conversation:"]
         for turn in turns:
-            history_lines.append(f"User: {turn.user}")
+            if turn.user.strip():
+                history_lines.append(f"User: {turn.user}")
             if turn.status == "interrupted":
                 history_lines.append(f"Vess (interrupted): {turn.assistant}")
                 if turn.interrupted_clause is not None:
