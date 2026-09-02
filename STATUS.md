@@ -2,6 +2,80 @@
 
 Update this at the end of every session. Newest at the top.
 
+## Latency telemetry follow-up — beam 5 and TTS worker wait
+
+Real-PC measurement on the RTX 3070 showed that Whisper `small` with CUDA and
+`int8_float16` was fast enough at beam 5 and that beam 1 was not an acceptable
+accuracy trade. Changing only `beam_size` from 1 to 5 corrected the measured
+transcript to `Say, plants turn sunlight into energy.` in **393.1 ms** at
+**0.14 RTF**. The repository and `_make_transcriber()` fallback now therefore
+use **beam 5**. This commit deliberately does **not** also change the repository
+`device` or `compute_type`; those remain separate variables rather than being
+silently bundled into the beam decision.
+
+The same hardware run measured a warm LLM first clause at **184.5 ms**, first
+TTS synthesis at **595.2 ms**, and an approximately **470 ms** endpoint wait.
+A long second TTS clause took **1908.3 ms**, but because it synthesized during
+playback the audible inter-clause gap was only **69.6 ms**. Rapid follow-ups
+then exposed the different problem that matters here: a stale synthesis already
+executing in the serial TTS worker can hold the newer generation behind it.
+
+### New telemetry
+
+- `audio_blocks_dropped` is published as **0** from `AudioLoop` construction,
+  instead of appearing as `null` until the first detected capture gap.
+- `tts_worker_wait_ms` is generation-scoped and measures **clause enqueue to
+  actual synthesis start**. That definition is intentional: it includes time a
+  new clause waits in the TTS queue behind an obsolete synthesis, plus any
+  one-ahead prepared-audio backpressure before the engine can start.
+- `tts_first_synthesis_ms` is the engine execution time for the **first
+  successfully synthesized spoken clause** of the current generation. It is
+  frozen once reported, while the older `tts_synthesis_ms` remains clause-level
+  playback telemetry and can therefore show a later clause.
+- Both new first-clause values reset with the existing generation-scoped latency
+  bundle. Delayed timing from an obsolete generation is ignored.
+- Existing `stale_tts_skipped` events remain separate from these durations.
+  Worker wait tells us how long the current generation was blocked; stale-skip
+  events tell us whether obsolete work was involved. Synthesis time is not
+  inflated to hide either condition.
+
+Synthesis timing now has its own callback from `VoiceOutput` to
+`ConversationWorker`. It is **not** a physical-delivery receipt. The first green
+attempt incorrectly sent `clause_synthesized` through `on_delivery`; an existing
+exact lifecycle test rejected that because delivery accounting is deliberately
+limited to playback events. The implementation was corrected rather than
+weakening that test. The dedicated timing callback is generation-filtered by
+`ConversationWorker`, preserving the same atomic debug-bundle ownership as the
+rest of the latency telemetry.
+
+### Verification
+
+The initial tests-only commit ran **200 tests** and failed only the four new
+expectations, proving beam 5, zero-drop initialization, first-TTS telemetry, and
+head-of-line worker wait were not already present. The first implementation
+made the new tests pass but failed one existing physical-delivery lifecycle
+test, which exposed the callback-boundary mistake above. A second tests-first
+red run then failed exactly on the missing dedicated synthesis-timing API and
+the still-polluted delivery sequence.
+
+After the boundary fix, GitHub Actions run 102 passed the full **200/200 unit
+tests**, `tools/render_behavior_preview.py`, and the comprehensive eye
+validation. A base-to-head review from `505951f3229a7d3cc39e7bf8f78e7f01c6bbbc2e`
+confirmed that the only config behavior changed in this pass is Whisper beam
+1 -> 5; `audio.silence_seconds` is still **0.45**, and the repository Whisper
+`device`/`compute_type` defaults are unchanged.
+
+### Next latency experiment
+
+Do **not** lower `audio.silence_seconds` in the telemetry commit. The next
+behavioral pass should change only **0.45 -> 0.30** on the real microphone and
+exercise ordinary sentences containing natural mid-sentence pauses, short
+hesitations, and sentence endings. Compare endpoint wait and transcription
+boundaries against the 0.45 baseline, and keep 0.30 only if it reduces endpoint
+latency without creating premature utterance splits. CI can verify segmentation
+mechanics, but it cannot determine whether a human pause sounds natural enough
+not to be cut off.
+
 ## Generation-scoped conversational latency telemetry
 
 The audio path now distinguishes the last sample VAD considered voiced from
@@ -119,8 +193,8 @@ which wake variants Whisper actually needs.
 
 - Step 4 transcribes every segmented utterance with Whisper on CPU, giving
   continuous CPU load and roughly one second of wake latency. A dedicated
-  local wake-word engine such as openWakeWord is a later separate step, not
-  an addition to this loop.
+  local wake-word engine such as openWakeWord is a later separate step, not an
+  addition to this loop.
 - There is no vision-model call at wake time: the current camera path has no
   safe shared latest-frame handoff, and another GPU model conflicts with the
   VRAM constraint. This remains an open later design task.
@@ -304,7 +378,7 @@ and confirm mirror direction in its installed position.
 Runtime state still picks *where* the face goes. Mood now scales *how* it gets
 there, through an optional `movement` block per entry in `moods.json` —
 multipliers against the constants in `animator.py`. The constants are the
-physics, the multipliers are the character. A mood with no block moves exactly
+physics; the multipliers are the character. A mood with no block moves exactly
 as neutral, so nothing that already existed had to change.
 
 Keys and limits: `hold` 0.25-3.0, `spread` 0.3-1.6, `ease` 0.3-3.0, `bob`
