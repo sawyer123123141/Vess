@@ -30,6 +30,7 @@ class TurnCoordinator:
         *,
         false_timeout_seconds: float,
         decision_watchdog_seconds: float,
+        timed_transcript_submit: Callable[[str, dict[str, object]], None] | None = None,
         timer_factory: TimerFactory | None = None,
     ) -> None:
         self._state = state
@@ -37,6 +38,7 @@ class TurnCoordinator:
         self._voice = voice
         self._conversation = conversation
         self._transcript_submit = transcript_submit
+        self._timed_transcript_submit = timed_transcript_submit
         self._false_timeout_seconds = max(0.0, float(false_timeout_seconds))
         self._decision_watchdog_seconds = max(0.0, float(decision_watchdog_seconds))
         self._timer_factory = timer_factory or _threading_timer
@@ -140,7 +142,12 @@ class TurnCoordinator:
         )
         watchdog.start()
 
-    def on_transcript(self, text: str) -> None:
+    def on_transcript(
+        self,
+        text: str,
+        *,
+        timing: dict[str, object] | None = None,
+    ) -> None:
         """Commit a real turn for non-empty text, otherwise roll the pause back."""
         clean_text = text.strip()
         if not clean_text:
@@ -157,7 +164,10 @@ class TurnCoordinator:
 
         cancelled = self._conversation.cancel_generation(generation_id, "barge_in")
         self._voice.commit_interruption(generation_id)
-        self._transcript_submit(clean_text)
+        if timing is not None and self._timed_transcript_submit is not None:
+            self._timed_transcript_submit(clean_text, timing)
+        else:
+            self._transcript_submit(clean_text)
         payload = {
             "generation_id": generation_id,
             "generation_cancelled": cancelled,

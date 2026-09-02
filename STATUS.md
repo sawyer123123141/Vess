@@ -2,6 +2,45 @@
 
 Update this at the end of every session. Newest at the top.
 
+## Generation-scoped conversational latency telemetry
+
+The audio path now distinguishes the last sample VAD considered voiced from
+the later moment when the configured silence window finalizes the utterance.
+It derives the last-voiced timestamp from the captured block's monotonic
+arrival time and the sample offset within that block instead of stamping
+"speech ended" after endpointing has already finished.
+
+`GET /debug` now adds these live values for accepted spoken requests:
+
+- `latency_generation_id` — response generation owning every displayed latency
+- `latency_timing_valid` — false when a capture gap makes endpoint timing unsafe
+- `endpoint_wait_ms` — last voiced sample to utterance finalization
+- `transcription_queue_ms` — finalization to Whisper actually starting
+- `transcription_ms` — Whisper execution
+- `tts_first_audio_ms` — first LLM clause ready to pre-delivery playback marker
+- `speech_end_to_playback_ms` — last voiced sample to that same marker
+
+The complete timing bundle follows the accepted request through ordinary and
+barge-in paths via an explicit timed-submit interface; the original one-argument
+request callback remains compatible. All public latency fields are reset and
+published together for one generation. Rejected or empty transcripts therefore
+cannot overwrite Whisper values while leaving LLM/TTS values from an older
+accepted turn, and delayed receipts from obsolete or cancelled responses cannot
+update the current bundle.
+
+If the bounded microphone queue overflows, `audio_blocks_dropped` increments and
+the active utterance's sample-derived endpoint is invalidated instead of
+reporting false precision. No VAD threshold, silence duration, Whisper setting,
+clause split, or interruption policy changed.
+
+`tts_first_audio_ms` and `speech_end_to_playback_ms` currently end at the
+the marker immediately before synchronous delivery/debug callbacks. They are
+not player-call or DAC timestamps; `latency_playback_marker` reports
+`pre_delivery_callback` to make that boundary explicit. The existing
+leading-silence telemetry remains separate,
+so hardware results must not claim sample-accurate physical onset from these
+values. Real-PC measurement is still required before choosing an optimization.
+
 ## Voice diagnostics console added
 
 The browser preview now includes a compact Diagnostics panel, refreshed every

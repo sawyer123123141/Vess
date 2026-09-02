@@ -81,6 +81,14 @@ class MainTests(unittest.TestCase):
         self.assertIs(runtime.coordinator.voice, runtime.voice)
         self.assertIs(runtime.coordinator.conversation, runtime.conversation)
         self.assertIs(runtime.conversation.voice, runtime.voice)
+        self.assertIs(
+            runtime.audio.on_timed_request.__self__,
+            runtime.conversation,
+        )
+        self.assertIs(
+            runtime.coordinator.timed_transcript_submit.__self__,
+            runtime.conversation,
+        )
 
         rendered = RenderedAudioBlock(
             samples=np.array([0.1], dtype=np.float32),
@@ -200,6 +208,9 @@ class FakeConversation:
     def submit(self, text: str) -> None:
         self.submitted.append(text)
 
+    def submit_with_timing(self, text: str, timing: dict[str, object]) -> None:
+        self.submitted.append(text)
+
     def cancel_generation(self, generation_id: int, reason: str) -> bool:
         return True
 
@@ -221,12 +232,14 @@ class FakeCoordinator:
         *,
         false_timeout_seconds,
         decision_watchdog_seconds,
+        timed_transcript_submit=None,
     ) -> None:
         self.voice = voice
         self.conversation = conversation
         self.transcript_submit = transcript_submit
         self.false_timeout_seconds = false_timeout_seconds
         self.decision_watchdog_seconds = decision_watchdog_seconds
+        self.timed_transcript_submit = timed_transcript_submit
 
     def close(self) -> None:
         if self.close_events is not None:
@@ -243,11 +256,13 @@ class FakeAudio:
         event_log,
         on_request,
         *,
+        on_timed_request=None,
         preprocessor=None,
         interruption_detector=None,
         turn_coordinator=None,
     ) -> None:
         self.on_request = on_request
+        self.on_timed_request = on_timed_request
         self.preprocessor = preprocessor
         self.interruption_detector = interruption_detector
         self.turn_coordinator = turn_coordinator

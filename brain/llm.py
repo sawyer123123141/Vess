@@ -299,6 +299,7 @@ class ConversationWorker:
         self._request_lock = threading.Lock()
         self._next_generation = 0
         self._latest_generation = 0
+        self._latency_by_generation: dict[int, dict[str, object]] = {}
         self._active_request_key: str | None = None
         self._pending_request_key: str | None = None
         self._thread: threading.Thread | None = None
@@ -314,6 +315,22 @@ class ConversationWorker:
         self._thread.start()
 
     def submit(self, request: str) -> None:
+        """Submit a request that has no authoritative microphone timing."""
+        self._submit(request, None)
+
+    def submit_with_timing(
+        self,
+        request: str,
+        timing: dict[str, object],
+    ) -> None:
+        """Submit one accepted transcript and its indivisible timing bundle."""
+        self._submit(request, timing)
+
+    def _submit(
+        self,
+        request: str,
+        timing: dict[str, object] | None,
+    ) -> None:
         key = _request_key(request)
         with self._request_lock:
             if key == self._active_request_key or key == self._pending_request_key:
@@ -330,16 +347,23 @@ class ConversationWorker:
             except queue.Empty:
                 pending = None
             if pending is not None:
-                _, replaced_request = pending
+                replaced_generation, replaced_request = pending
+                self._clear_latency_locked(replaced_generation)
+
+            self._latency_by_generation.clear()
+            latency = dict(timing or {})
+            latency["first_clause_ready_at"] = None
+            latency["playback_reported"] = False
+            self._latency_by_generation[generation_id] = latency
 
             self._pending_request_key = key
             self._voice.begin_generation(generation_id)
             self._requests.put_nowait((generation_id, request))
-
-        self._state.update_debug(
-            conversation_queue=self._requests.qsize(),
-            active_generation=generation_id,
-        )
+            self._state.update_debug(
+                conversation_queue=self._requests.qsize(),
+                active_generation=generation_id,
+                **self._latency_debug_values(generation_id, latency),
+            )
         if replaced_request is not None:
             self._state.record_debug(
                 "pending_request_replaced",
@@ -355,6 +379,11 @@ class ConversationWorker:
             self._next_generation += 1
             replacement_generation = self._next_generation
             self._latest_generation = replacement_generation
+            self._latency_by_generation.clear()
+            self._state.update_debug(
+                active_generation=replacement_generation,
+                **self._latency_debug_values(replacement_generation, {}),
+            )
 
         self._delivery.interrupt(expected_generation)
         self._voice.begin_generation(replacement_generation)
@@ -365,12 +394,17 @@ class ConversationWorker:
         }
         self._event_log.append("generation_cancelled", payload)
         self._state.record_debug("generation_cancelled", **payload)
-        self._state.update_debug(active_generation=replacement_generation)
         return True
 
     def handle_delivery(self, event_type: str, payload: dict[str, object]) -> None:
         """Forward physical voice lifecycle receipts into delivered-memory accounting."""
+        self._record_playback_latency(event_type, payload)
         self._delivery.handle(event_type, payload)
+        if event_type == "generation_playback_drained":
+            generation_id = payload.get("generation_id")
+            if isinstance(generation_id, int):
+                with self._request_lock:
+                    self._clear_latency_locked(generation_id)
 
     def close(self) -> None:
         if self._thread is None:
@@ -436,9 +470,17 @@ class ConversationWorker:
                 with self._state.locked():
                     self._state.thinking = False
                 if first_clause:
-                    latency_ms = (time.perf_counter() - llm_started_at) * 1000.0
+                    first_clause_ready_at = time.perf_counter()
+                    latency_ms = (first_clause_ready_at - llm_started_at) * 1000.0
                     rounded = round(latency_ms, 1)
-                    self._state.update_debug(llm_first_clause_ms=rounded)
+                    with self._request_lock:
+                        latency = self._latency_by_generation.get(generation_id)
+                        if (
+                            generation_id == self._latest_generation
+                            and latency is not None
+                        ):
+                            latency["first_clause_ready_at"] = first_clause_ready_at
+                            self._state.update_debug(llm_first_clause_ms=rounded)
                     self._state.record_debug(
                         "llm_first_clause",
                         clause=clause.text,
@@ -480,6 +522,78 @@ class ConversationWorker:
         finally:
             with self._state.locked():
                 self._state.thinking = False
+
+    def _record_playback_latency(
+        self,
+        event_type: str,
+        payload: dict[str, object],
+    ) -> None:
+        if event_type != "clause_started":
+            return
+        generation_id = payload.get("generation_id")
+        playback_delivery_started_at = payload.get("playback_delivery_started_at")
+        if not isinstance(generation_id, int) or not isinstance(
+            playback_delivery_started_at,
+            (int, float),
+        ):
+            return
+
+        with self._request_lock:
+            if generation_id != self._latest_generation:
+                return
+            latency = self._latency_by_generation.get(generation_id)
+            if latency is None or latency.get("playback_reported") is True:
+                return
+            first_clause_ready_at = latency.get("first_clause_ready_at")
+            if not isinstance(first_clause_ready_at, (int, float)):
+                return
+            speech_ended_at = latency.get("speech_ended_at")
+            speech_end_to_playback_ms = None
+            if isinstance(speech_ended_at, (int, float)):
+                speech_end_to_playback_ms = round(
+                    max(float(playback_delivery_started_at) - speech_ended_at, 0.0)
+                    * 1000.0,
+                    1,
+                )
+            latency["playback_reported"] = True
+            self._state.update_debug(
+                tts_first_audio_ms=round(
+                    max(
+                        float(playback_delivery_started_at) - first_clause_ready_at,
+                        0.0,
+                    )
+                    * 1000.0,
+                    1,
+                ),
+                speech_end_to_playback_ms=speech_end_to_playback_ms,
+            )
+
+    def _clear_latency_locked(self, generation_id: int) -> None:
+        self._latency_by_generation.pop(generation_id, None)
+
+    @staticmethod
+    def _latency_debug_values(
+        generation_id: int,
+        latency: dict[str, object],
+    ) -> dict[str, object]:
+        public_fields = (
+            "endpoint_wait_ms",
+            "transcription_queue_ms",
+            "transcription_ms",
+            "speech_to_transcript_ms",
+            "utterance_seconds",
+            "transcription_rtf",
+        )
+        values = {field: latency.get(field) for field in public_fields}
+        values.update(
+            latency_generation_id=generation_id,
+            latency_timing_valid=bool(latency.get("latency_timing_valid", False)),
+            latency_playback_marker="pre_delivery_callback",
+            llm_first_clause_ms=None,
+            tts_first_audio_ms=None,
+            speech_end_to_playback_ms=None,
+        )
+        return values
 
     def _finalize_delivered_turn(
         self,

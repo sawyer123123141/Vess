@@ -194,12 +194,14 @@ def _build_voice_runtime(
         decision_watchdog_seconds=float(
             barge_in.get("max_interruption_decision_seconds", 5.0)
         ),
+        timed_transcript_submit=conversation.submit_with_timing,
     )
     audio = audio_factory(
         config,
         state,
         event_log,
         conversation.submit,
+        on_timed_request=conversation.submit_with_timing,
         preprocessor=preprocessor,
         interruption_detector=interruption_detector,
         turn_coordinator=coordinator,

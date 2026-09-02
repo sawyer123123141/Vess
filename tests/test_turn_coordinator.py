@@ -101,6 +101,9 @@ class TurnCoordinatorTests(unittest.TestCase):
         def submit(text: str) -> None:
             effects.append(("submit", text))
 
+        def timed_submit(text: str, timing: dict[str, object]) -> None:
+            effects.append(("timed_submit", text, timing))
+
         coordinator = TurnCoordinator(
             state,
             log,
@@ -110,6 +113,7 @@ class TurnCoordinatorTests(unittest.TestCase):
             false_timeout_seconds=2.0,
             decision_watchdog_seconds=5.0,
             timer_factory=timers,
+            timed_transcript_submit=timed_submit,
         )
         return coordinator, state, log, voice, conversation, timers, effects
 
@@ -119,11 +123,16 @@ class TurnCoordinatorTests(unittest.TestCase):
         self.assertTrue(coordinator.on_candidate())
         self.assertTrue(state.listening)
         coordinator.on_utterance_queued_for_transcription()
-        coordinator.on_transcript("wait")
+        timing = {"speech_ended_at": 12.5, "endpoint_wait_ms": 450.0}
+        coordinator.on_transcript("wait", timing=timing)
 
         self.assertEqual(
             effects[-3:],
-            [("cancel", 7, "barge_in"), ("commit", 7), ("submit", "wait")],
+            [
+                ("cancel", 7, "barge_in"),
+                ("commit", 7),
+                ("timed_submit", "wait", timing),
+            ],
         )
         self.assertFalse(state.listening)
         self.assertTrue(timers.timers[0].cancelled)

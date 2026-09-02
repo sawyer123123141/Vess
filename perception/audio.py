@@ -25,8 +25,15 @@ class WakeMatch:
 @dataclass(frozen=True)
 class _QueuedUtterance:
     samples: np.ndarray
-    speech_ended_at: float
+    speech_ended_at: float | None
+    utterance_finalized_at: float
     barge_in: bool = False
+
+
+@dataclass(frozen=True)
+class CompletedUtterance:
+    samples: np.ndarray
+    speech_end_offset_samples: int | None
 
 
 class UtteranceAssembler:
@@ -52,10 +59,17 @@ class UtteranceAssembler:
         )
         self._samples: list[float] = []
         self._trailing_quiet = 0
+        self._timing_valid = True
 
     def push(self, samples: np.ndarray) -> np.ndarray | None:
         """Return one finished utterance, if this block completes one."""
-        for sample in np.asarray(samples).reshape(-1):
+        completed = self.push_with_timing(samples)
+        return completed.samples if completed is not None else None
+
+    def push_with_timing(self, samples: np.ndarray) -> CompletedUtterance | None:
+        """Return speech plus its last-voiced position within the input block."""
+        block = np.asarray(samples).reshape(-1)
+        for index, sample in enumerate(block):
             amplitude = abs(float(sample))
             if not self._samples:
                 if amplitude < self._threshold:
@@ -74,9 +88,9 @@ class UtteranceAssembler:
                 self._trailing_quiet = 0
 
             if len(self._samples) >= self._max_samples:
-                return self._finish()
+                return self._finish(block.size - index - 1)
             if self._trailing_quiet >= self._silence_samples:
-                return self._finish()
+                return self._finish(block.size - index - 1)
         return None
 
     def status(self) -> dict[str, object]:
@@ -91,6 +105,14 @@ class UtteranceAssembler:
         self._pre_roll.clear()
         self._samples = []
         self._trailing_quiet = 0
+        self._timing_valid = True
+
+    def invalidate_timing(self) -> None:
+        """Mark an active utterance's sample-derived endpoint as unreliable."""
+        if self._samples:
+            self._timing_valid = False
+        else:
+            self._pre_roll.clear()
 
     def _useful_pre_roll(self) -> list[float]:
         """Keep contiguous pre-trigger audio once it rises above deep silence."""
@@ -100,14 +122,21 @@ class UtteranceAssembler:
                 return buffered[index:]
         return []
 
-    def _finish(self) -> np.ndarray | None:
+    def _finish(self, remaining_block_samples: int) -> CompletedUtterance | None:
         final_index = len(self._samples) - self._trailing_quiet
         utterance = np.asarray(self._samples[:final_index], dtype=np.float32)
+        speech_end_offset_samples = None
+        if self._timing_valid:
+            speech_end_offset_samples = self._trailing_quiet + max(
+                int(remaining_block_samples),
+                0,
+            )
         self._samples = []
         self._trailing_quiet = 0
+        self._timing_valid = True
         if len(utterance) < self._min_samples:
             return None
-        return utterance
+        return CompletedUtterance(utterance, speech_end_offset_samples)
 
 
 class AudioLoop:
@@ -121,6 +150,7 @@ class AudioLoop:
         on_request: Callable[[str], None],
         transcribe: Callable[[np.ndarray], str] | None = None,
         *,
+        on_timed_request: Callable[[str, dict[str, object]], None] | None = None,
         preprocessor: CapturePreprocessor | None = None,
         interruption_detector: Any | None = None,
         turn_coordinator: Any | None = None,
@@ -131,6 +161,7 @@ class AudioLoop:
         self._state = state
         self._event_log = event_log
         self._on_request = on_request
+        self._on_timed_request = on_timed_request
         self._transcribe = transcribe
         self._sample_rate = int(settings.get("sample_rate", 16_000))
         self._variants = list(settings.get("wake_variants", ["hey vess"]))
@@ -157,6 +188,9 @@ class AudioLoop:
         )
         self._barge_in_capture_active = False
         self._barge_in_decision_pending = threading.Event()
+        self._capture_sequence = 0
+        self._last_capture_sequence: int | None = None
+        self._audio_blocks_dropped = 0
 
         self._blocks: queue.Queue[CapturedAudioBlock | np.ndarray | None] = queue.Queue(
             maxsize=16
@@ -176,6 +210,7 @@ class AudioLoop:
         samples: np.ndarray,
         *,
         speech_ended_at: float | None = None,
+        utterance_finalized_at: float | None = None,
     ) -> None:
         """Transcribe one utterance and dispatch it if the conversation gate allows."""
         transcription_started = time.perf_counter()
@@ -188,10 +223,11 @@ class AudioLoop:
             return
 
         transcription_finished = time.perf_counter()
-        self._record_transcription_latency(
+        timing = self._transcription_timing(
             transcription_started,
             transcription_finished,
             speech_ended_at,
+            utterance_finalized_at,
             int(np.asarray(samples).size),
         )
 
@@ -212,7 +248,7 @@ class AudioLoop:
             self._event_log.append("wake_accepted", payload)
             self._state.record_debug("wake_accepted", **payload)
             request = " ".join(transcript.split()[accepted.consumed_words:])
-            self._on_request(request)
+            self._dispatch_request(request, timing)
             return
 
         if self._conversation_is_active():
@@ -220,7 +256,7 @@ class AudioLoop:
             followup_payload = {"transcript": transcript}
             self._event_log.append("followup_accepted", followup_payload)
             self._state.record_debug("followup_accepted", **followup_payload)
-            self._on_request(transcript)
+            self._dispatch_request(transcript, timing)
             return
 
         self._event_log.append("wake_rejected", payload)
@@ -231,6 +267,7 @@ class AudioLoop:
         samples: np.ndarray,
         *,
         speech_ended_at: float | None = None,
+        utterance_finalized_at: float | None = None,
     ) -> None:
         """Transcribe overlapping speech directly into the pending turn decision."""
         coordinator = self._turn_coordinator
@@ -252,10 +289,11 @@ class AudioLoop:
             return
 
         transcription_finished = time.perf_counter()
-        self._record_transcription_latency(
+        timing = self._transcription_timing(
             transcription_started,
             transcription_finished,
             speech_ended_at,
+            utterance_finalized_at,
             int(np.asarray(samples).size),
         )
         self._state.record_debug(
@@ -264,7 +302,10 @@ class AudioLoop:
             source="barge_in",
         )
         try:
-            coordinator.on_transcript(transcript)
+            coordinator.on_transcript(
+                transcript,
+                timing=timing,
+            )
         finally:
             self._barge_in_decision_pending.clear()
 
@@ -323,15 +364,17 @@ class AudioLoop:
         _status: object = None,
     ) -> None:
         samples = np.asarray(indata[:, 0], dtype=np.float32).copy()
+        self._capture_sequence += 1
         block = CapturedAudioBlock(
             samples=samples,
             adc_time=_input_adc_time(time_info),
             received_at=time.perf_counter(),
+            capture_sequence=self._capture_sequence,
         )
         try:
             self._blocks.put_nowait(block)
         except queue.Full:
-            pass
+            self._audio_blocks_dropped += 1
 
     def _run(self) -> None:
         self._ensure_transcribe_thread()
@@ -341,6 +384,7 @@ class AudioLoop:
                 if queued_block is None:
                     return
                 block = self._coerce_capture_block(queued_block)
+                self._observe_capture_sequence(block)
                 with self._state.locked():
                     speaking = self._state.speaking
 
@@ -362,7 +406,7 @@ class AudioLoop:
                         self._state.update_debug(audio_ignored=True)
                     continue
 
-                utterance = self._assembler.push(block.samples)
+                utterance = self._assembler.push_with_timing(block.samples)
                 status = self._assembler.status()
                 with self._state.locked():
                     self._state.listening = bool(status["vad_active"])
@@ -380,8 +424,15 @@ class AudioLoop:
                             "audio_dropped", reason="transcriber_unavailable"
                         )
                     else:
+                        speech_ended_at = None
+                        if utterance.speech_end_offset_samples is not None:
+                            speech_ended_at = (
+                                block.received_at
+                                - utterance.speech_end_offset_samples / self._sample_rate
+                            )
                         self._queue_latest_utterance(
-                            utterance,
+                            utterance.samples,
+                            speech_ended_at,
                             time.perf_counter(),
                             barge_in=False,
                         )
@@ -413,7 +464,7 @@ class AudioLoop:
                 self._interruption_detector.reset()
                 self._barge_in_assembler.reset()
 
-        utterance = self._barge_in_assembler.push(processed)
+        utterance = self._barge_in_assembler.push_with_timing(processed)
         status = self._barge_in_assembler.status()
         peak = float(np.max(np.abs(processed))) if processed.size else 0.0
         self._state.update_debug(
@@ -436,8 +487,15 @@ class AudioLoop:
             self._turn_coordinator.on_transcription_error(error)
             self._barge_in_decision_pending.clear()
             return
+        speech_ended_at = None
+        if utterance.speech_end_offset_samples is not None:
+            speech_ended_at = (
+                block.received_at
+                - utterance.speech_end_offset_samples / self._sample_rate
+            )
         self._queue_latest_utterance(
-            utterance,
+            utterance.samples,
+            speech_ended_at,
             time.perf_counter(),
             barge_in=True,
         )
@@ -473,14 +531,32 @@ class AudioLoop:
             received_at=time.perf_counter(),
         )
 
+    def _observe_capture_sequence(self, block: CapturedAudioBlock) -> None:
+        sequence = block.capture_sequence
+        if sequence is None:
+            return
+        previous = self._last_capture_sequence
+        self._last_capture_sequence = sequence
+        if previous is None or sequence == previous + 1:
+            return
+        self._assembler.invalidate_timing()
+        self._barge_in_assembler.invalidate_timing()
+        self._state.update_debug(audio_blocks_dropped=self._audio_blocks_dropped)
+
     def _queue_latest_utterance(
         self,
         utterance: np.ndarray,
-        speech_ended_at: float,
+        speech_ended_at: float | None,
+        utterance_finalized_at: float,
         *,
         barge_in: bool,
     ) -> None:
-        item = _QueuedUtterance(utterance, speech_ended_at, barge_in)
+        item = _QueuedUtterance(
+            utterance,
+            speech_ended_at,
+            utterance_finalized_at,
+            barge_in,
+        )
         while True:
             try:
                 self._utterances.put_nowait(item)
@@ -494,7 +570,12 @@ class AudioLoop:
                 if replaced is None:
                     self._utterances.put_nowait(None)
                     return
-                age_ms = (time.perf_counter() - replaced.speech_ended_at) * 1000.0
+                age_origin = (
+                    replaced.speech_ended_at
+                    if replaced.speech_ended_at is not None
+                    else replaced.utterance_finalized_at
+                )
+                age_ms = (time.perf_counter() - age_origin) * 1000.0
                 self._state.record_debug(
                     "pending_utterance_replaced",
                     age_ms=round(age_ms, 1),
@@ -546,7 +627,12 @@ class AudioLoop:
             item = self._utterances.get()
             if item is None:
                 return
-            age_ms = (time.perf_counter() - item.speech_ended_at) * 1000.0
+            age_origin = (
+                item.speech_ended_at
+                if item.speech_ended_at is not None
+                else item.utterance_finalized_at
+            )
+            age_ms = (time.perf_counter() - age_origin) * 1000.0
             self._state.update_debug(
                 transcription_queue=self._utterances.qsize(),
                 utterance_age_ms=round(age_ms, 1),
@@ -555,25 +641,35 @@ class AudioLoop:
                 self.handle_barge_in_utterance(
                     item.samples,
                     speech_ended_at=item.speech_ended_at,
+                    utterance_finalized_at=item.utterance_finalized_at,
                 )
             else:
                 self.handle_utterance(
                     item.samples,
                     speech_ended_at=item.speech_ended_at,
+                    utterance_finalized_at=item.utterance_finalized_at,
                 )
 
-    def _record_transcription_latency(
+    def _transcription_timing(
         self,
         transcription_started: float,
         transcription_finished: float,
         speech_ended_at: float | None,
+        utterance_finalized_at: float | None,
         sample_count: int,
-    ) -> None:
+    ) -> dict[str, object]:
         transcription_seconds = max(transcription_finished - transcription_started, 0.0)
         utterance_seconds = (
             max(sample_count, 0) / self._sample_rate if self._sample_rate > 0 else 0.0
         )
         payload: dict[str, object] = {
+            "speech_ended_at": speech_ended_at,
+            "utterance_finalized_at": utterance_finalized_at,
+            "transcription_started_at": transcription_started,
+            "transcription_finished_at": transcription_finished,
+            "latency_timing_valid": (
+                speech_ended_at is not None and utterance_finalized_at is not None
+            ),
             "transcription_ms": round(transcription_seconds * 1000.0, 1),
             "utterance_seconds": round(utterance_seconds, 3),
             "transcription_rtf": (
@@ -587,7 +683,22 @@ class AudioLoop:
                 (transcription_finished - speech_ended_at) * 1000.0,
                 1,
             )
-        self._state.update_debug(**payload)
+        if speech_ended_at is not None and utterance_finalized_at is not None:
+            payload["endpoint_wait_ms"] = round(
+                max(utterance_finalized_at - speech_ended_at, 0.0) * 1000.0,
+                1,
+            )
+            payload["transcription_queue_ms"] = round(
+                max(transcription_started - utterance_finalized_at, 0.0) * 1000.0,
+                1,
+            )
+        return payload
+
+    def _dispatch_request(self, request: str, timing: dict[str, object]) -> None:
+        if self._on_timed_request is not None:
+            self._on_timed_request(request, timing)
+        else:
+            self._on_request(request)
 
     def _record_audio_error(self, error: Exception) -> None:
         self._event_log.append("audio_error", {"error": str(error)})

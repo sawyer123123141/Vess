@@ -20,6 +20,27 @@ class RecordingLog:
 
 
 class TtsPipelineTests(unittest.TestCase):
+    def test_clause_start_receipt_includes_generation_playback_timestamp(self) -> None:
+        deliveries: list[tuple[str, dict[str, object]]] = []
+        voice = VoiceOutput(
+            {"voice": {"sample_rate": 1_000}},
+            State(),
+            RecordingLog(),
+            synthesize=lambda text: np.ones(10, dtype=np.float32),
+            play=lambda audio, sample_rate: None,
+            on_delivery=lambda event, payload: deliveries.append((event, payload)),
+        )
+        voice.start()
+        voice.begin_generation(4)
+        voice.enqueue("hello", generation_id=4)
+        voice.close()
+
+        started = next(
+            payload for event, payload in deliveries if event == "clause_started"
+        )
+        self.assertEqual(started["generation_id"], 4)
+        self.assertIsInstance(started["playback_delivery_started_at"], float)
+
     def test_next_clause_synthesizes_while_current_clause_plays(self) -> None:
         first_play_started = threading.Event()
         release_first_play = threading.Event()

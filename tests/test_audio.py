@@ -43,6 +43,21 @@ class WakeMatchTests(unittest.TestCase):
 
 
 class UtteranceAssemblerTests(unittest.TestCase):
+    def test_timed_completion_locates_last_voiced_audio_within_input_block(self) -> None:
+        assembler = UtteranceAssembler(10, 0.1, 0.2, 0.3, 2.0)
+
+        completed = assembler.push_with_timing(
+            np.array([0.2, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0])
+        )
+
+        self.assertIsNotNone(completed)
+        assert completed is not None
+        np.testing.assert_allclose(
+            completed.samples,
+            np.array([0.2, 0.2], dtype=np.float32),
+        )
+        self.assertEqual(completed.speech_end_offset_samples, 5)
+
     def test_assembler_emits_speech_after_trailing_silence(self) -> None:
         assembler = UtteranceAssembler(10, 0.1, 0.2, 0.3, 2.0)
 
@@ -152,12 +167,14 @@ class AudioLoopTests(unittest.TestCase):
 
     def test_transcription_records_latency_from_speech_end(self) -> None:
         state = State()
+        timed: list[dict[str, object]] = []
         loop = AudioLoop(
             CONFIG,
             state,
             RecordingLog(),
             lambda _: None,
             transcribe=lambda _: "hey vess hello",
+            on_timed_request=lambda _, timing: timed.append(timing),
         )
 
         loop.handle_utterance(
@@ -165,10 +182,115 @@ class AudioLoopTests(unittest.TestCase):
             speech_ended_at=time.perf_counter() - 0.05,
         )
 
+        self.assertEqual(len(timed), 1)
+        self.assertIn("transcription_ms", timed[0])
+        self.assertIn("speech_to_transcript_ms", timed[0])
+        self.assertGreaterEqual(
+            timed[0]["speech_to_transcript_ms"],
+            timed[0]["transcription_ms"],
+        )
+
+    def test_latency_separates_endpoint_wait_and_forwards_speech_end(self) -> None:
+        state = State()
+        dispatched: list[str] = []
+        timed: list[tuple[str, dict[str, object]]] = []
+
+        loop = AudioLoop(
+            CONFIG,
+            state,
+            RecordingLog(),
+            dispatched.append,
+            transcribe=lambda _: "hey vess hello",
+            on_timed_request=lambda text, timing: timed.append((text, timing)),
+        )
+
+        with patch("perception.audio.time.perf_counter", side_effect=[10.0, 10.5]):
+            loop.handle_utterance(
+                np.ones(16_000, dtype=np.float32),
+                speech_ended_at=9.4,
+                utterance_finalized_at=9.85,
+            )
+
+        self.assertEqual(dispatched, [])
+        self.assertEqual(len(timed), 1)
+        request, timing = timed[0]
+        self.assertEqual(request, "hello")
+        self.assertEqual(timing["speech_ended_at"], 9.4)
+        self.assertEqual(timing["endpoint_wait_ms"], 450.0)
+        self.assertEqual(timing["transcription_queue_ms"], 150.0)
+        self.assertEqual(timing["speech_to_transcript_ms"], 1100.0)
+        self.assertNotIn("endpoint_wait_ms", state.debug_snapshot()["values"])
+
+    def test_rejected_transcript_does_not_mix_with_accepted_latency_bundle(self) -> None:
+        state = State()
+        state.update_debug(
+            latency_generation_id=3,
+            transcription_ms=111.0,
+            llm_first_clause_ms=222.0,
+        )
+        loop = AudioLoop(
+            CONFIG,
+            state,
+            RecordingLog(),
+            lambda _: None,
+            transcribe=lambda _: "unrelated background speech",
+        )
+
+        with patch("perception.audio.time.perf_counter", side_effect=[20.0, 21.0]):
+            loop.handle_utterance(
+                np.ones(16_000, dtype=np.float32),
+                speech_ended_at=19.0,
+                utterance_finalized_at=19.45,
+            )
+
         values = state.debug_snapshot()["values"]
-        self.assertIn("transcription_ms", values)
-        self.assertIn("speech_to_transcript_ms", values)
-        self.assertGreaterEqual(values["speech_to_transcript_ms"], values["transcription_ms"])
+        self.assertEqual(values["latency_generation_id"], 3)
+        self.assertEqual(values["transcription_ms"], 111.0)
+        self.assertEqual(values["llm_first_clause_ms"], 222.0)
+
+    def test_capture_sequence_invalidates_only_utterance_spanning_gap(self) -> None:
+        state = State()
+        timed: list[dict[str, object]] = []
+        loop = AudioLoop(
+            _small_audio_config(barge_in_enabled=False),
+            state,
+            RecordingLog(),
+            lambda _: None,
+            transcribe=lambda _: "hey vess hello",
+            on_timed_request=lambda text, timing: timed.append(timing),
+        )
+        worker = threading.Thread(target=loop._run, daemon=True)
+        worker.start()
+
+        now = time.perf_counter()
+        for sequence, sample in ((1, 0.3), (2, 0.0), (3, 0.0)):
+            loop._blocks.put(
+                CapturedAudioBlock(
+                    np.array([sample], dtype=np.float32),
+                    None,
+                    now + sequence / 10.0,
+                    capture_sequence=sequence,
+                )
+            )
+        self.assertTrue(_wait_until(lambda: len(timed) == 1))
+        self.assertTrue(timed[0]["latency_timing_valid"])
+
+        loop._audio_blocks_dropped = 1
+        for sequence, sample in ((4, 0.3), (6, 0.0), (7, 0.0)):
+            loop._blocks.put(
+                CapturedAudioBlock(
+                    np.array([sample], dtype=np.float32),
+                    None,
+                    now + sequence / 10.0,
+                    capture_sequence=sequence,
+                )
+            )
+        self.assertTrue(_wait_until(lambda: len(timed) == 2))
+
+        self.assertFalse(timed[1]["latency_timing_valid"])
+        self.assertIsNone(timed[1]["speech_ended_at"])
+        self.assertEqual(state.debug_snapshot()["values"]["audio_blocks_dropped"], 1)
+        _stop_loop(loop, worker)
 
     def test_capture_keeps_draining_blocks_while_transcription_runs(self) -> None:
         transcribe_started = threading.Event()
@@ -275,6 +397,7 @@ class AudioLoopTests(unittest.TestCase):
         np.testing.assert_allclose(block.samples, np.array([0.1, 0.2], dtype=np.float32))
         self.assertEqual(block.adc_time, 12.5)
         self.assertEqual(block.received_at, 99.25)
+        self.assertEqual(block.capture_sequence, 1)
 
     def test_disabled_barge_in_preserves_speaking_time_discard(self) -> None:
         state = State(speaking=True)
@@ -514,7 +637,12 @@ class RecordingCoordinator:
     def on_utterance_queued_for_transcription(self) -> None:
         self.events.append(("queued", None))
 
-    def on_transcript(self, text: str) -> None:
+    def on_transcript(
+        self,
+        text: str,
+        *,
+        timing: dict[str, object] | None = None,
+    ) -> None:
         self.events.append(("transcript", text))
         with self.state.locked():
             self.state.listening = False

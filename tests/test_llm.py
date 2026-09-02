@@ -3,6 +3,7 @@
 import json
 import time
 import unittest
+from unittest.mock import patch
 
 from brain.llm import ConversationWorker, OllamaClient, SpeechClause, build_prompt, split_clauses
 from brain.memory import append_conversation_turn
@@ -18,6 +19,100 @@ PERFORMANCES = {
 
 
 class LlmTests(unittest.TestCase):
+    def test_first_playback_derives_generation_scoped_conversation_latency(self) -> None:
+        state = State()
+        voice = RecordingVoice()
+        worker = ConversationWorker(
+            {"personas": {"friendly": "Warm."}},
+            {"neutral": {}},
+            state,
+            RecordingLog(),
+            FakeClient(),
+            voice,
+            performances=PERFORMANCES,
+        )
+
+        with patch("brain.llm.time.perf_counter", side_effect=[11.0, 12.0]):
+            worker.start()
+            worker.submit_with_timing(
+                "Tell me something",
+                {
+                    "speech_ended_at": 9.0,
+                    "utterance_finalized_at": 9.45,
+                    "transcription_started_at": 9.5,
+                    "transcription_finished_at": 10.0,
+                    "latency_timing_valid": True,
+                    "endpoint_wait_ms": 450.0,
+                    "transcription_queue_ms": 50.0,
+                    "transcription_ms": 500.0,
+                    "speech_to_transcript_ms": 1000.0,
+                    "utterance_seconds": 1.0,
+                    "transcription_rtf": 0.5,
+                },
+            )
+            worker.close()
+
+        initial = state.debug_snapshot()["values"]
+        self.assertEqual(initial["latency_generation_id"], 1)
+        self.assertEqual(initial["endpoint_wait_ms"], 450.0)
+        self.assertIsNone(initial["tts_first_audio_ms"])
+
+        worker.handle_delivery(
+            "clause_started",
+            {
+                "generation_id": 1,
+                "text": "First, then second.",
+                "playback_delivery_started_at": 13.5,
+            },
+        )
+
+        values = state.debug_snapshot()["values"]
+        self.assertEqual(values["tts_first_audio_ms"], 1500.0)
+        self.assertEqual(values["speech_end_to_playback_ms"], 4500.0)
+
+    def test_cancelled_generation_cannot_publish_delayed_playback_latency(self) -> None:
+        state = State()
+        worker = ConversationWorker(
+            {"personas": {"friendly": "Warm."}},
+            {"neutral": {}},
+            state,
+            RecordingLog(),
+            FakeClient(),
+            RecordingVoice(),
+            performances=PERFORMANCES,
+        )
+
+        with patch("brain.llm.time.perf_counter", side_effect=[11.0, 12.0]):
+            worker.start()
+            worker.submit_with_timing(
+                "Tell me something",
+                {
+                    "speech_ended_at": 9.0,
+                    "latency_timing_valid": True,
+                    "endpoint_wait_ms": 450.0,
+                    "transcription_queue_ms": 50.0,
+                    "transcription_ms": 500.0,
+                    "speech_to_transcript_ms": 1000.0,
+                    "utterance_seconds": 1.0,
+                    "transcription_rtf": 0.5,
+                },
+            )
+            worker.close()
+
+        self.assertTrue(worker.cancel_generation(1, "test"))
+        worker.handle_delivery(
+            "clause_started",
+            {
+                "generation_id": 1,
+                "text": "First, then second.",
+                "playback_delivery_started_at": 13.5,
+            },
+        )
+
+        values = state.debug_snapshot()["values"]
+        self.assertIsNone(values["tts_first_audio_ms"])
+        self.assertIsNone(values["speech_end_to_playback_ms"])
+
     def test_split_clauses_keeps_short_comma_phrase_together(self) -> None:
         self.assertEqual(
             list(split_clauses(["First, then", " second.", " Last"], PERFORMANCES)),

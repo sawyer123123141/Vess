@@ -56,12 +56,14 @@ class WhisperRuntimeTests(unittest.TestCase):
 
     def test_audio_loop_reports_utterance_duration_and_realtime_factor(self) -> None:
         state = State()
+        timed: list[dict[str, object]] = []
         loop = AudioLoop(
             {"audio": {"sample_rate": 16_000, "conversation_timeout_seconds": 0}},
             state,
             RecordingLog(),
             lambda _: None,
-            transcribe=lambda _: "hello",
+            transcribe=lambda _: "hey vess hello",
+            on_timed_request=lambda _, timing: timed.append(timing),
         )
 
         with patch("perception.audio.time.perf_counter", side_effect=[10.0, 10.5]):
@@ -70,7 +72,8 @@ class WhisperRuntimeTests(unittest.TestCase):
                 speech_ended_at=9.9,
             )
 
-        values = state.debug_snapshot()["values"]
+        self.assertEqual(len(timed), 1)
+        values = timed[0]
         self.assertEqual(values["utterance_seconds"], 2.0)
         self.assertEqual(values["transcription_ms"], 500.0)
         self.assertEqual(values["speech_to_transcript_ms"], 600.0)

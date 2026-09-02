@@ -13,6 +13,7 @@ class CapturedAudioBlock:
     samples: np.ndarray
     adc_time: float | None
     received_at: float
+    capture_sequence: int | None = None
 
 
 @dataclass(frozen=True)

@@ -451,31 +451,37 @@ class VoiceOutput:
             debug_values["tts_raw_trailing_silence_ms"] = raw_trailing_ms
         self._state.update_debug(**debug_values)
 
-        playback_started_at = time.perf_counter()
-        if (
-            self._last_playback_ended_at is not None
-            and generation_id == self._last_playback_generation
-        ):
-            gap_ms = round(
-                (playback_started_at - self._last_playback_ended_at) * 1000.0,
-                1,
-            )
-            payload["gap_ms"] = gap_ms
-            self._state.update_debug(tts_gap_ms=gap_ms)
-
         with self._interruption_condition:
             self._current_playback = context
             self._paused_playback = None
             self._interruption_decision = None
 
         self._activate_playback_state(context)
+        # This marker is immediately before synchronous delivery/debug callbacks.
+        # The player call follows those callbacks, so this is not DAC/audio onset.
+        playback_delivery_started_at = time.perf_counter()
+        if (
+            self._last_playback_ended_at is not None
+            and generation_id == self._last_playback_generation
+        ):
+            gap_ms = round(
+                (playback_delivery_started_at - self._last_playback_ended_at) * 1000.0,
+                1,
+            )
+            payload["gap_ms"] = gap_ms
+            self._state.update_debug(tts_gap_ms=gap_ms)
         if kind == "speak":
             self._emit_delivery(
                 "clause_started",
                 generation_id=generation_id,
                 text=text,
+                playback_delivery_started_at=playback_delivery_started_at,
             )
-        self._state.record_debug("tts_playback_started", **payload)
+        self._state.record_debug(
+            "tts_playback_started",
+            generation_id=generation_id,
+            **payload,
+        )
 
         try:
             receipt = self._player.play(audio, sample_rate, generation_id)
