@@ -129,11 +129,28 @@ class WebPreview(DisplayTarget):
 class WebServer:
     """Runs the local control UI without owning the render loop."""
 
-    def __init__(self, state: State, port: int, event_log: object | None = None) -> None:
+    def __init__(
+        self,
+        state: State,
+        port: int,
+        event_log: object | None = None,
+        command_registry: object | None = None,
+    ) -> None:
         self.preview = WebPreview()
+        self.command_registry = command_registry
         config = uvicorn.Config(
-            create_app(state, self.preview, event_log), host="127.0.0.1", port=port,
-            log_level="warning", access_log=False, ws="none")
+            create_app(
+                state,
+                self.preview,
+                event_log,
+                command_registry=command_registry,
+            ),
+            host="127.0.0.1",
+            port=port,
+            log_level="warning",
+            access_log=False,
+            ws="none",
+        )
         self._server = uvicorn.Server(config)
         self._thread: threading.Thread | None = None
 
@@ -152,6 +169,8 @@ def create_app(
     state: State,
     preview: WebPreview,
     event_log: object | None = None,
+    *,
+    command_registry: object | None = None,
 ) -> FastAPI:
     """Build the local web app around the supplied state and frame target."""
     app = FastAPI()
@@ -170,6 +189,35 @@ def create_app(
     @app.get("/debug")
     def debug() -> dict[str, object]:
         return state.debug_snapshot()
+
+    @app.get("/commands")
+    def commands() -> dict[str, object]:
+        if command_registry is None:
+            raise HTTPException(status_code=503, detail="command registry unavailable")
+        return command_registry.catalog()
+
+    @app.post("/commands")
+    def execute_command(payload: dict[str, object]) -> dict[str, object]:
+        if command_registry is None:
+            raise HTTPException(status_code=503, detail="command registry unavailable")
+        call = command_registry.validate(payload)
+        if call is None:
+            raise HTTPException(status_code=422, detail="command is not allowed")
+        try:
+            result = command_registry.execute(call)
+        except Exception as error:
+            raise HTTPException(status_code=500, detail="command execution failed") from error
+        if event_log is not None:
+            event_log.append("command_executed", result.event_payload)
+        state.record_debug(
+            "command_executed",
+            source="web",
+            **result.event_payload,
+        )
+        return {
+            "spoken_response": result.spoken_response,
+            "command": result.event_payload,
+        }
 
     @app.put("/color")
     def set_color(request: ColorRequest) -> dict[str, list[int]]:
