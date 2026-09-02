@@ -2,6 +2,68 @@
 
 Update this at the end of every session. Newest at the top.
 
+## First-clause TTS latency pass — early balanced comma
+
+Real-PC telemetry with `audio.silence_seconds` temporarily set to **0.30**
+locally measured **320.7 ms** endpoint wait, **235.3 ms** Whisper execution,
+**422.7 ms** to the first LLM clause, **106.5 ms** TTS worker wait, and
+**1590.8 ms** first-clause TTS synthesis. Total last-speech to playback was
+**2678.1 ms**. A later 36-character clause synthesized in **698.6 ms**, while
+the inter-clause playback gap stayed at **0.5 ms**. That isolates the dominant
+latency in this sample to the size of the first Chatterbox synthesis request,
+not the already-pipelined later clauses.
+
+The slow first sentence was `Imagine floating together in a starry expanse,
+where our thoughts are the only light.` Its comma lands at character 45, but
+the old splitter only considered comma boundaries after the buffer reached
+**120 characters**. The full 85-character sentence therefore went to
+Chatterbox in one synchronous `generate(text)` call. The current Chatterbox
+Turbo adapter exposes whole-chunk generation rather than incremental audio, so
+there is no native token-streaming switch to enable in Vess's existing path.
+
+### Change
+
+Only the first spoken chunk gets a lower-latency comma option. A comma between
+characters **40 and 59** can become the first TTS boundary if it occurs before
+strong punctuation. After the first chunk is emitted, the existing 120/180
+character clause policy is unchanged. Very short introductory phrases such as
+`First, then second.` remain intact, and a comma split keeps the same
+sentence-level performance cue because comma is not a strong performance
+boundary.
+
+This is deliberately narrower than globally lowering the clause-size limits.
+The goal is to get useful first audio moving without turning every later
+sentence into a chain of tiny TTS jobs. Physical prosody still needs a real
+speaker check: CI can prove which text chunks are produced, but it cannot prove
+that the early comma sounds natural.
+
+### Verification
+
+Tests were written before production code. Commit
+`5656eecb14d0b1a393246d2d60ed8c46b0f38868` added the measured slow sentence
+plus a short-comma guard; GitHub Actions run **104** failed the unit-test job on
+the old splitter and skipped behavior preview as expected. Production commit
+`9ccf757bca9a0ed91be62bee48146745b6468e65` then implemented only the
+first-chunk rule. Run **105** passed the full unit-test job, behavior
+verification, and comprehensive eye validation.
+
+A production-commit diff review found only `brain/llm.py`, with **14 additions
+and 2 deletions**. No TTS engine, delivery, memory, config, or later-clause
+policy changed in that commit.
+
+The repository still keeps `audio.silence_seconds` at **0.45**. The measured
+0.30 value is a local hardware experiment and should not become the repository
+default until natural mid-sentence pauses are confirmed not to split.
+
+### Next hardware check
+
+Pull this branch, keep the local 0.30 endpoint experiment if desired, restart
+Vess, and exercise several normal prompts. Compare `tts_first_synthesis_ms`,
+`tts_first_audio_ms`, and `speech_end_to_playback_ms` on responses whose first
+sentence contains a natural comma near the new window. Also listen for an
+unnatural pause or prosody reset at that comma. Keep the heuristic only if the
+real first-audio reduction is meaningful and the spoken result remains natural.
+
 ## Latency telemetry follow-up — beam 5 and TTS worker wait
 
 Real-PC measurement on the RTX 3070 showed that Whisper `small` with CUDA and
