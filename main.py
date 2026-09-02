@@ -14,6 +14,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any
 
+from brain.commands import CommandRegistry
 from brain.llm import ConversationWorker, OllamaClient
 from brain.memory import EventLog, FactMemory
 from brain.turn_coordinator import TurnCoordinator
@@ -119,6 +120,8 @@ def _build_display(
     config: dict,
     state: State,
     event_log: EventLog | None = None,
+    *,
+    command_registry: Any | None = None,
 ) -> tuple[Display, WebServer | None]:
     """Build every enabled output target around the one rendered frame."""
     display_config = config.get("display", {})
@@ -131,6 +134,7 @@ def _build_display(
             state,
             int(web_config.get("port", 8080)),
             event_log,
+            command_registry=command_registry,
         )
         targets.append(web_server.preview)
     if display_config.get("cv2_enabled", False):
@@ -149,6 +153,7 @@ def _build_voice_runtime(
     *,
     client: Any | None = None,
     durable_memory: Any | None = None,
+    command_registry: Any | None = None,
     preprocessor: Any | None = None,
     interruption_detector: Any | None = None,
     player_factory: Any = SoundDeviceAudioPlayer,
@@ -198,6 +203,8 @@ def _build_voice_runtime(
     conversation_kwargs: dict[str, Any] = {"performances": performances}
     if durable_memory is not None:
         conversation_kwargs["durable_memory"] = durable_memory
+    if command_registry is not None:
+        conversation_kwargs["command_registry"] = command_registry
     conversation = conversation_factory(
         config,
         moods,
@@ -266,8 +273,14 @@ def main() -> None:
     event_log = EventLog(ROOT / "vess.db")
     event_log.append("session_started", {})
     state = State()
+    command_registry = CommandRegistry(config, state)
     animator = FaceAnimator(moods, performances)
-    display, web_server = _build_display(config, state, event_log)
+    display, web_server = _build_display(
+        config,
+        state,
+        event_log,
+        command_registry=command_registry,
+    )
     client = OllamaClient()
     try:
         durable_memory = _build_fact_memory(config, client)
@@ -284,6 +297,7 @@ def main() -> None:
             event_log,
             client=client,
             durable_memory=durable_memory,
+            command_registry=command_registry,
         )
     except Exception:
         if durable_memory is not None:
