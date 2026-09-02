@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from brain.llm import ConversationWorker, OllamaClient
-from brain.memory import EventLog
+from brain.memory import EventLog, FactMemory
 from brain.turn_coordinator import TurnCoordinator
 from control.web import WebServer
 from output.animator import FaceAnimator
@@ -50,12 +50,15 @@ class VoiceRuntime:
     conversation: Any
     coordinator: Any
     audio: Any
+    durable_memory: Any | None = None
 
     def close(self) -> None:
-        """Shut down capture and timers before workers that they can affect."""
+        """Shut down producers before draining the workers they can affect."""
         self.audio.close()
         self.coordinator.close()
         self.conversation.close()
+        if self.durable_memory is not None:
+            self.durable_memory.close()
         self.voice.close()
 
 
@@ -65,6 +68,20 @@ def _load(name: str) -> dict:
 
 def _load_performances() -> dict[str, dict[str, object]]:
     return load_performance_definitions(_load("performance.json"))
+
+
+def _build_fact_memory(
+    config: dict[str, Any],
+    client: Any,
+    *,
+    path: Path = ROOT / "vess.db",
+    factory: Any = FactMemory,
+) -> Any:
+    """Bind durable extraction to the one local Ollama client and config."""
+    return factory(
+        path,
+        lambda text, known_keys: client.extract_facts(text, known_keys, config),
+    )
 
 
 def _start_perception(config: dict, state: State,
@@ -131,6 +148,7 @@ def _build_voice_runtime(
     event_log: Any,
     *,
     client: Any | None = None,
+    durable_memory: Any | None = None,
     preprocessor: Any | None = None,
     interruption_detector: Any | None = None,
     player_factory: Any = SoundDeviceAudioPlayer,
@@ -177,6 +195,9 @@ def _build_voice_runtime(
         on_delivery=on_delivery,
         on_synthesis_timing=on_synthesis_timing,
     )
+    conversation_kwargs: dict[str, Any] = {"performances": performances}
+    if durable_memory is not None:
+        conversation_kwargs["durable_memory"] = durable_memory
     conversation = conversation_factory(
         config,
         moods,
@@ -184,7 +205,7 @@ def _build_voice_runtime(
         event_log,
         client if client is not None else OllamaClient(),
         voice,
-        performances=performances,
+        **conversation_kwargs,
     )
     conversation_holder["conversation"] = conversation
 
@@ -219,6 +240,7 @@ def _build_voice_runtime(
         conversation=conversation,
         coordinator=coordinator,
         audio=audio,
+        durable_memory=durable_memory,
     )
 
 
@@ -246,13 +268,27 @@ def main() -> None:
     state = State()
     animator = FaceAnimator(moods, performances)
     display, web_server = _build_display(config, state, event_log)
-    runtime = _build_voice_runtime(
-        config,
-        moods,
-        performances,
-        state,
-        event_log,
-    )
+    client = OllamaClient()
+    try:
+        durable_memory = _build_fact_memory(config, client)
+    except Exception as error:
+        durable_memory = None
+        print(f"durable memory off: {error}")
+
+    try:
+        runtime = _build_voice_runtime(
+            config,
+            moods,
+            performances,
+            state,
+            event_log,
+            client=client,
+            durable_memory=durable_memory,
+        )
+    except Exception:
+        if durable_memory is not None:
+            durable_memory.close()
+        raise
 
     stop = threading.Event()
     thread, camera = _start_perception(config, state, stop)
