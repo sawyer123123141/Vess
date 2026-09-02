@@ -672,15 +672,14 @@ class ConversationWorker:
                 )
             return False
 
-        if not self._is_latest(generation_id):
-            self._state.record_debug(
-                "stale_response_cancelled",
-                generation_id=generation_id,
-            )
-            return True
-
         try:
-            result = registry.execute(call)
+            with self._request_lock:
+                if generation_id != self._latest_generation:
+                    stale = True
+                    result = None
+                else:
+                    stale = False
+                    result = registry.execute(call)
         except Exception as error:
             payload = {"name": call.name, "error": str(error)}
             self._event_log.append("command_error", payload)
@@ -694,6 +693,14 @@ class ConversationWorker:
             self._state.record_debug("llm_complete", generation_id=generation_id)
             return True
 
+        if stale:
+            self._state.record_debug(
+                "stale_response_cancelled",
+                generation_id=generation_id,
+            )
+            return True
+
+        assert result is not None
         self._event_log.append("command_executed", result.event_payload)
         self._state.record_debug(
             "command_executed",
