@@ -1,0 +1,34 @@
+{
+  "items": [
+    {
+      "id": "owner-short-01",
+      "audio": "owner-short-01.wav",
+      "transcript": "mhm",
+      "expected_utterances": 1,
+      "source": "owner",
+      "tags": ["short"],
+      "expression": "neutral",
+      "intensity": 0.0
+    },
+    {
+      "id": "owner-hesitation-01",
+      "audio": "owner-hesitation-01.wav",
+      "transcript": "I was wondering actually tell me why the sky changes color",
+      "expected_utterances": 1,
+      "source": "owner",
+      "tags": ["hesitation", "mid_sentence_pause"],
+      "expression": "curious",
+      "intensity": 0.55
+    },
+    {
+      "id": "public-normal-01",
+      "audio": "public-normal-01.wav",
+      "transcript": "replace this with the clip's reference transcript",
+      "expected_utterances": 1,
+      "source": "common_voice",
+      "tags": ["public", "normal"],
+      "expression": "neutral",
+      "intensity": 0.0
+    }
+  ]
+}
