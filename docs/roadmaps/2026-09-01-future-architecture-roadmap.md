@@ -440,6 +440,71 @@ Use distributions (especially p50/p95), not only averages.
 
 ---
 
+## Candidate Future Capabilities
+
+These are promising ideas worth preserving, but they are **not immediate priorities** and should not bypass the development order above. Each should get its own bounded design review when it becomes relevant.
+
+### More expressive face behavior
+
+Use the existing `PerformanceCue` / animation path rather than inventing another emotion classifier.
+
+Candidate additions:
+
+- subtle pupil dilation/contraction tied to expression and intensity
+- brief pupil expansion for surprise/excitement, smaller changes for curiosity or skepticism
+- smooth easing back to the neutral pupil size
+- synchronized pupil-size changes by default; avoid random asymmetric dilation
+- deliberate winks, double blinks, glances, eye-contact breaks, and short expression animations
+
+Keep pupil-size changes restrained enough to read on the 64x64 face without turning the design into exaggerated cartoon animation. A rough candidate range is about 10-25% from baseline, but real panel testing should decide the final limits.
+
+### Expanded command registry
+
+The closed command registry should grow by adding **real human-approved handlers**, not by giving the model general shell authority. `set_color` is the initial proven command boundary; future additions can reuse it.
+
+Useful candidates:
+
+- `open_app` / `close_app` using human-authored app mappings in config
+- media play/pause and bounded volume control
+- timers
+- persona, mood, mute, sleep, and wake controls
+- deliberate face actions such as `wink`, `look_left`, `look_right`, `look_at_me`, or `double_blink`
+- short fun modes such as `celebrate`, `rainbow`, `freeze`, `suspicious`, or another explicitly bounded expression sequence
+- trivial deterministic utilities such as coin flips or dice rolls when they improve the assistant feel
+
+Do not turn ordinary conversational requests like "tell me something weird" into commands merely to increase the command count. A command should represent a deterministic capability or state/action change that benefits from explicit validation and execution.
+
+For OS actions, app names should map to paths or identifiers written by a human. Slow or external handlers should use a prepare/commit or otherwise generation-safe execution design rather than inheriting the tiny in-memory `set_color` critical section blindly.
+
+### Search, discovery, and media lookup tools
+
+Web/music discovery should become a **tool layer**, not be crammed into the closed local command registry and not grant the model unrestricted browser or shell access.
+
+Candidate capabilities:
+
+- web search for current facts, documentation, products, places, news, and similar lookups
+- song/music search from a description, artist, movie/game context, or partial remembered details
+- structured search results with stable provider/result IDs rather than raw model-invented URLs
+- search followed by a separately validated action, such as finding a song and then playing the selected result through an approved music provider/app
+- opening a verified search result or documentation page through an approved browser action
+
+Conceptually:
+
+```text
+speech/request
+  -> intent/tool selection
+  -> bounded search tool
+  -> structured results
+  -> Vess reasons over results
+  -> optional approved action
+```
+
+Keep **search** and **action** as separate permissions. Finding a song should not automatically authorize arbitrary playback or navigation. Any follow-on action should consume a verified result identifier/provider record and pass through the relevant execution boundary.
+
+This tool layer is one of the features that could eventually make Vess substantially more useful than a local chatbot with a face, but it should come after the action/executor foundation is reliable enough to verify real outcomes.
+
+---
+
 ## Ideas to Avoid or Delay
 
 Unless later evidence changes the tradeoff, do **not** prioritize:
