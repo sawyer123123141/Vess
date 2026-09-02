@@ -399,7 +399,6 @@ class ConversationWorker:
 
     def handle_delivery(self, event_type: str, payload: dict[str, object]) -> None:
         """Forward physical voice lifecycle receipts into delivered-memory accounting."""
-        self._record_tts_latency(event_type, payload)
         self._record_playback_latency(event_type, payload)
         self._delivery.handle(event_type, payload)
         if event_type == "generation_playback_drained":
@@ -407,6 +406,10 @@ class ConversationWorker:
             if isinstance(generation_id, int):
                 with self._request_lock:
                     self._clear_latency_locked(generation_id)
+
+    def handle_synthesis_timing(self, payload: dict[str, object]) -> None:
+        """Publish synthesis telemetry only when it belongs to the latest generation."""
+        self._record_tts_latency(payload)
 
     def close(self) -> None:
         if self._thread is None:
@@ -527,11 +530,8 @@ class ConversationWorker:
 
     def _record_tts_latency(
         self,
-        event_type: str,
         payload: dict[str, object],
     ) -> None:
-        if event_type != "clause_synthesized":
-            return
         generation_id = payload.get("generation_id")
         worker_wait_ms = payload.get("worker_wait_ms")
         synthesis_ms = payload.get("synthesis_ms")

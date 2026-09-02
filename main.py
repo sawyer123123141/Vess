@@ -164,12 +164,18 @@ def _build_voice_runtime(
         if conversation is not None:
             conversation.handle_delivery(event_type, payload)
 
+    def on_synthesis_timing(payload: dict[str, object]) -> None:
+        conversation = conversation_holder.get("conversation")
+        if conversation is not None:
+            conversation.handle_synthesis_timing(payload)
+
     voice = voice_factory(
         config,
         state,
         event_log,
         player=player,
         on_delivery=on_delivery,
+        on_synthesis_timing=on_synthesis_timing,
     )
     conversation = conversation_factory(
         config,

@@ -42,6 +42,7 @@ class VoiceOutput:
         engine: TTSEngine | None = None,
         player: AudioPlayer | None = None,
         on_delivery: Callable[[str, dict[str, object]], None] | None = None,
+        on_synthesis_timing: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
         self._config = config
         self._state = state
@@ -55,6 +56,7 @@ class VoiceOutput:
         else:
             self._player = SoundDeviceAudioPlayer()
         self._on_delivery = on_delivery
+        self._on_synthesis_timing = on_synthesis_timing
 
         self._queue: queue.Queue[
             tuple[
@@ -388,8 +390,7 @@ class VoiceOutput:
             return
 
         if isinstance(generation_id, int) and worker_wait_ms is not None:
-            self._emit_delivery(
-                "clause_synthesized",
+            self._emit_synthesis_timing(
                 generation_id=generation_id,
                 text=text,
                 worker_wait_ms=round(worker_wait_ms, 1),
@@ -674,6 +675,17 @@ class VoiceOutput:
             return
         with self._state.locked():
             self._state.last_spoke = time.time()
+
+    def _emit_synthesis_timing(self, **payload: object) -> None:
+        if self._on_synthesis_timing is None:
+            return
+        try:
+            self._on_synthesis_timing(dict(payload))
+        except Exception as error:
+            self._state.record_debug(
+                "synthesis_timing_callback_error",
+                error=str(error),
+            )
 
     def _emit_delivery(self, event_type: str, **payload: object) -> None:
         if self._on_delivery is None:
