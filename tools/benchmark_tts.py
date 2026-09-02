@@ -31,11 +31,13 @@ def measure_one(
     text: str,
     run_index: int,
     now: Callable[[], float] = time.perf_counter,
+    performance: PerformanceCue | None = None,
 ) -> tuple[dict[str, object], SynthesisResult | None]:
     """Measure one synchronous engine synthesis call."""
+    cue = performance or PerformanceCue()
     started = now()
     try:
-        result = engine.synthesize(text, PerformanceCue())
+        result = engine.synthesize(text, cue)
     except Exception as error:
         elapsed = now() - started
         return (
@@ -45,6 +47,8 @@ def measure_one(
                 "text": text,
                 "run_index": run_index,
                 "warm": run_index > 0,
+                "expression": cue.expression,
+                "intensity": cue.intensity,
                 "synthesis_ms": round(elapsed * 1000.0, 3),
                 "audio_duration_ms": None,
                 "realtime_factor": None,
@@ -66,6 +70,8 @@ def measure_one(
             "text": text,
             "run_index": run_index,
             "warm": run_index > 0,
+            "expression": cue.expression,
+            "intensity": cue.intensity,
             "synthesis_ms": round(elapsed * 1000.0, 3),
             "audio_duration_ms": round(audio_seconds * 1000.0, 3),
             "realtime_factor": (
@@ -119,14 +125,18 @@ def _print_summary(rows: Sequence[dict[str, object]]) -> None:
         print(f"{text_id:<10}  {synth_label:>10}  {rtf_label:>8}")
 
 
-def run_benchmark(engine_name: str, runs: int) -> int:
+def run_benchmark(
+    engine_name: str,
+    runs: int,
+    output_dir: Path | None = None,
+) -> int:
     """Run the standard local benchmark and persist comparable artifacts."""
     from output.tts.factory import create_tts_engine
 
     config = _load_config()
     config.setdefault("voice", {})["engine"] = engine_name
     engine = create_tts_engine(config)
-    output_dir = ROOT / "artifacts" / "tts-benchmark" / engine_name
+    destination = output_dir or ROOT / "artifacts" / "tts-benchmark" / engine_name
     rows: list[dict[str, object]] = []
 
     for text_id, text in STANDARD_TEXTS:
@@ -145,9 +155,9 @@ def run_benchmark(engine_name: str, runs: int) -> int:
                 f"{row['synthesis_ms']} ms ({status})"
             )
             if result is not None:
-                write_wave(output_dir / f"{text_id}-run{run_index}.wav", result)
+                write_wave(destination / f"{text_id}-run{run_index}.wav", result)
 
-    write_results(output_dir / "results.json", rows)
+    write_results(destination / "results.json", rows)
     _print_summary(rows)
     return 0 if all(bool(row["success"]) for row in rows) else 1
 
