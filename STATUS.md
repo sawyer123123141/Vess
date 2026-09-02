@@ -2,6 +2,95 @@
 
 Update this at the end of every session. Newest at the top.
 
+## Step 7 done — conservative unprompted triggers, live-camera gated
+
+Vess can now initiate one short line on its own after a meaningful presence or
+interaction transition, without pretending that trigger context was something
+the user said. The runtime remains deliberately dormant with the repository's
+current static image source: only `camera.source == "camera"` constructs the
+proactive trigger worker. Static `image` and `video` sources never enable real
+unprompted speech.
+
+### Change
+
+`brain/triggers.py` owns pure trigger decisions plus a small 0.5-second polling
+worker. The first two triggers are `returned_after_absence`, which requires an
+actually observed `present -> absent -> present` cycle lasting at least four
+hours, and `quiet_interaction`, which requires 30 minutes without a real user
+interaction while a person is visibly present. Startup while already absent
+cannot manufacture a long absence.
+
+Both triggers share hard gates: no unprompted line while muted, listening,
+thinking, speaking, absent, or inside the configured 22:00-08:00 quiet hours;
+one accepted proactive line per 60 minutes; and no second proactive line in the
+same idle/presence stretch until the user genuinely interacts or a new absence
+cycle begins. Failed proactive submission races do not consume the cooldown or
+one-shot latch.
+
+`State.last_interaction` is updated only by real user submissions. Vess's own
+proactive output does not advance that clock, preventing a self-sustaining nag
+loop where one unsolicited line eventually becomes justification for another.
+
+`brain/proactive.py` adds a focused `ProactiveConversationWorker` on top of the
+existing conversation pipeline. Trigger context is labeled as a proactive
+system observation, not a user request. Proactive generations reuse the same
+latest-generation cancellation, clause splitting, physical delivery ledger,
+TTS, and short-term delivery truth as normal speech, but skip command selection
+and mood classification from trigger context. Delivered proactive speech is
+remembered as assistant-only short-term context; it never enters durable fact
+extraction because there is no user text. A later ordinary prompt also omits an
+empty `User:` label for that assistant-only turn.
+
+`main.py` now defaults to the proactive-aware conversation worker, starts the
+trigger worker only for the live `camera` source, and shuts triggers down before
+the audio/conversation/voice pipeline. With the current `camera.source =
+"image"`, startup prints that proactive speech is off because a live camera is
+required and no trigger thread is created.
+
+This pass does not invent active-window, typing, call-state, acoustic-silence,
+or probabilistic heuristics. Those need trustworthy producers before they can be
+hard gates rather than guesses dressed as context.
+
+### Verification
+
+The trigger worker was built tests-first. Tests-only commit
+`84ad278e6a2b34a449101dcafb8a6a7adb379336` produced Actions run **187**:
+**282 tests** ran, the existing **281** passed, and only the missing
+`TriggerWorker` import failed. Production head
+`39a04ec03cd558021e2576dd0ce354100d006072` then passed run **188**, including
+behavior verification and comprehensive eye validation.
+
+Runtime-gating tests-only commit `5cc447d4e73e86dfa049fa8817b4b407f6a97420`
+produced run **189**, failing only the expected missing live-camera builder,
+proactive runtime default, trigger shutdown ownership, and 0.5-second polling
+contract. Production runtime commit `aef3f49e0da4a513cb7d03b3f1efaa5ac5e4b827`
+passed run **191** completely.
+
+Final review restored one written provenance requirement that the first green
+implementation had relaxed. Commit `288ef573a658ea6cf4f5d6cae94d23eb8a6105d4`
+added a regression requiring assistant-only proactive history to omit a blank
+`User:` label; run **192** ran **291 tests** and failed only that regression.
+Commit `fa8ccb83ca85c4f5023202c69d82b463c45e2a77` changed exactly one conditional
+in `brain/llm.py`; run **193** then passed **291/291 unit tests**, behavior
+verification, comprehensive eye validation, artifact upload, and the failure
+gate.
+
+A base-to-head review from Step 6 main
+`f5b7206fdb21952dac9e12c613836b48fe1c3470` found changes only in the trigger
+and proactive-conversation modules, one prompt-history conditional, one config
+value, one State field, runtime wiring, Step 7 design/plan docs, and their tests.
+No shell/control authority, filesystem actions, desktop-perception stub,
+probabilistic scoring, or acoustic-silence trigger was introduced.
+
+### Next hardware check
+
+The code path is complete, but presence-driven behavior is not claimed as
+physically validated without a webcam. When one is available, switch
+`camera.source` to `"camera"`, keep the intended camera index, restart Vess, and
+verify real `present -> absent -> present` transitions plus mirror direction in
+the installed position. Until then, the static `test.jpg` path continues to
+exercise vision without ever enabling unprompted speech.
+
 ## Step 6 done — closed command registry
 
 Vess now has one closed, reusable command boundary shared by voice and the local
