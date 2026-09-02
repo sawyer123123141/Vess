@@ -34,6 +34,8 @@ _IDENTITY_PROMPT = (
 _SOFT_CLAUSE_CHARS = 120
 _HARD_CLAUSE_CHARS = 180
 _MIN_COMMA_CLAUSE_CHARS = 60
+_FIRST_CLAUSE_COMMA_MIN_CHARS = 40
+_FIRST_CLAUSE_COMMA_MAX_CHARS = 60
 _PERFORMANCE_PREFIX = "[[vess:"
 _STRONG_BOUNDARIES = ".!?\n"
 _INTERRUPTED_HISTORY_WARNING = (
@@ -117,6 +119,7 @@ def split_clauses(
     pending = ""
     current_cue = PerformanceCue()
     needs_cue = True
+    first_clause = True
 
     for chunk in chunks:
         pending += chunk
@@ -128,7 +131,7 @@ def split_clauses(
                 pending, current_cue = parsed
                 needs_cue = False
 
-            end = _clause_end(pending)
+            end = _clause_end(pending, allow_early_comma=first_clause)
             if end is None:
                 break
 
@@ -137,6 +140,7 @@ def split_clauses(
             pending = pending[end + 1 :]
             if clean_text:
                 yield SpeechClause(clean_text, current_cue)
+                first_clause = False
 
             if boundary in _STRONG_BOUNDARIES:
                 current_cue = PerformanceCue()
@@ -709,9 +713,17 @@ def _request_key(value: str) -> str:
     return " ".join(normalised.split()) or "<acknowledgement>"
 
 
-def _clause_end(text: str) -> int | None:
+def _clause_end(text: str, *, allow_early_comma: bool = False) -> int | None:
     """Choose a natural streamed speech boundary without letting buffers grow forever."""
     strong = _first_index(text, _STRONG_BOUNDARIES)
+    if allow_early_comma:
+        comma = text.find(",")
+        if (
+            _FIRST_CLAUSE_COMMA_MIN_CHARS <= comma < _FIRST_CLAUSE_COMMA_MAX_CHARS
+            and (strong is None or comma < strong)
+        ):
+            return comma
+
     if strong is not None and strong < _SOFT_CLAUSE_CHARS:
         return strong
 
