@@ -129,6 +129,8 @@ def run_benchmark(
     engine_name: str,
     runs: int,
     output_dir: Path | None = None,
+    *,
+    performance: PerformanceCue | None = None,
 ) -> int:
     """Run the standard local benchmark and persist comparable artifacts."""
     from output.tts.factory import create_tts_engine
@@ -137,6 +139,7 @@ def run_benchmark(
     config.setdefault("voice", {})["engine"] = engine_name
     engine = create_tts_engine(config)
     destination = output_dir or ROOT / "artifacts" / "tts-benchmark" / engine_name
+    cue = performance or PerformanceCue()
     rows: list[dict[str, object]] = []
 
     for text_id, text in STANDARD_TEXTS:
@@ -147,6 +150,7 @@ def run_benchmark(
                 text_id,
                 text,
                 run_index,
+                performance=cue,
             )
             rows.append(row)
             status = "ok" if row["success"] else f"failed: {row['error']}"
