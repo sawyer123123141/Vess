@@ -84,7 +84,7 @@ class ChatterboxTurboEngineTests(unittest.TestCase):
         self.assertEqual(FakeTurboTTS.loads, ["cuda"])
         self.assertEqual(
             FakeTurboTTS.model.calls,
-            [("first", {}), ("second", {})],
+            [("first", {}), ("second [chuckle]", {})],
         )
         self.assertEqual(first.sample_rate, 24_000)
         self.assertEqual(second.sample_rate, 24_000)
@@ -129,7 +129,7 @@ class ChatterboxTurboEngineTests(unittest.TestCase):
         )
         self.assertEqual(result.sample_rate, 24_000)
 
-    def test_performance_does_not_rewrite_text_in_v1(self) -> None:
+    def test_nonapproved_performance_does_not_rewrite_text(self) -> None:
         with patch.dict(sys.modules, fake_chatterbox_modules()):
             from output.tts.chatterbox_turbo import ChatterboxTurboEngine
 
