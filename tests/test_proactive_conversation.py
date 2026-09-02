@@ -4,8 +4,9 @@ import threading
 import time
 import unittest
 
-from brain.llm import ConversationWorker, build_proactive_prompt, build_prompt
+from brain.llm import build_prompt
 from brain.memory import append_conversation_turn
+from brain.proactive import ProactiveConversationWorker, build_proactive_prompt
 from performance import PerformanceCue
 from state import State
 
@@ -42,7 +43,7 @@ class ProactiveConversationTests(unittest.TestCase):
         self.assertIn("do not ask a generic question", prompt.lower())
         self.assertIn("do not infer", prompt.lower())
 
-    def test_prompt_history_omits_blank_user_line_for_proactive_turn(self) -> None:
+    def test_prompt_history_keeps_assistant_only_turn_without_fake_trigger_user_text(self) -> None:
         state = State()
         append_conversation_turn(
             state,
@@ -56,7 +57,7 @@ class ProactiveConversationTests(unittest.TestCase):
         prompt = build_prompt(CONFIG, MOODS, state, "I know.")
 
         self.assertIn("Vess: Back in the room, I see.", prompt)
-        self.assertNotIn("User: \n", prompt)
+        self.assertNotIn(f"User: {CONTEXT}", prompt)
         self.assertIn("Current request:\nI know.", prompt)
 
     def test_proactive_submission_refuses_to_replace_pending_user_request(self) -> None:
@@ -139,7 +140,7 @@ def make_worker(*, auto_deliver: bool = False, client=None):
     log = RecordingLog()
     memory = RecordingMemory()
     actual_client = client or RecordingClient()
-    worker = ConversationWorker(
+    worker = ProactiveConversationWorker(
         CONFIG,
         MOODS,
         state,
