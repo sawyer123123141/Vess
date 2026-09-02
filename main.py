@@ -15,8 +15,10 @@ from pathlib import Path
 from typing import Any
 
 from brain.commands import CommandRegistry
-from brain.llm import ConversationWorker, OllamaClient
+from brain.llm import OllamaClient
 from brain.memory import EventLog, FactMemory
+from brain.proactive import ProactiveConversationWorker
+from brain.triggers import TriggerWorker
 from brain.turn_coordinator import TurnCoordinator
 from control.web import WebServer
 from output.animator import FaceAnimator
@@ -52,9 +54,12 @@ class VoiceRuntime:
     coordinator: Any
     audio: Any
     durable_memory: Any | None = None
+    triggers: Any | None = None
 
     def close(self) -> None:
         """Shut down producers before draining the workers they can affect."""
+        if self.triggers is not None:
+            self.triggers.close()
         self.audio.close()
         self.coordinator.close()
         self.conversation.close()
@@ -82,6 +87,26 @@ def _build_fact_memory(
     return factory(
         path,
         lambda text, known_keys: client.extract_facts(text, known_keys, config),
+    )
+
+
+def _build_trigger_worker(
+    config: dict[str, Any],
+    state: State,
+    event_log: Any,
+    conversation: Any,
+    *,
+    trigger_factory: Any = TriggerWorker,
+) -> Any | None:
+    """Enable proactive speech only when presence comes from a live camera."""
+    source = str(config.get("camera", {}).get("source", "camera"))
+    if source != "camera":
+        return None
+    return trigger_factory(
+        state,
+        config.get("triggers", {}),
+        conversation.submit_proactive,
+        event_log,
     )
 
 
@@ -158,7 +183,7 @@ def _build_voice_runtime(
     interruption_detector: Any | None = None,
     player_factory: Any = SoundDeviceAudioPlayer,
     voice_factory: Any = VoiceOutput,
-    conversation_factory: Any = ConversationWorker,
+    conversation_factory: Any = ProactiveConversationWorker,
     coordinator_factory: Any = TurnCoordinator,
     audio_factory: Any = AudioLoop,
 ) -> VoiceRuntime:
@@ -323,6 +348,19 @@ def main() -> None:
         runtime.audio.start()
     except RuntimeError as error:
         print(f"voice input off: {error}")
+
+    runtime.triggers = _build_trigger_worker(
+        config,
+        state,
+        event_log,
+        runtime.conversation,
+    )
+    if runtime.triggers is not None:
+        runtime.triggers.start()
+    else:
+        source = str(config.get("camera", {}).get("source", "camera"))
+        if source != "camera":
+            print("proactive speech off: live camera source required")
 
     print("keys:")
     for index, name in enumerate(mood_names, start=1):
