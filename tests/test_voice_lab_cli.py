@@ -1,9 +1,14 @@
 """Voice Lab CLI contract tests."""
 
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 
 from tools.voice_lab import artifact_path, build_parser, with_whisper_beam
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class VoiceLabCliTests(unittest.TestCase):
@@ -24,6 +29,18 @@ class VoiceLabCliTests(unittest.TestCase):
     def test_artifact_path_is_scoped_under_voice_lab(self) -> None:
         path = artifact_path(Path("artifacts"), "endpoint", "results.json")
         self.assertEqual(path, Path("artifacts") / "voice-lab" / "endpoint" / "results.json")
+
+    def test_script_path_can_start_from_repository_root(self) -> None:
+        completed = subprocess.run(
+            [sys.executable, "tools/voice_lab.py", "--help"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("endpoint", completed.stdout)
+        self.assertIn("cancel", completed.stdout)
 
 
 if __name__ == "__main__":
