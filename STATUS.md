@@ -2,6 +2,76 @@
 
 Update this at the end of every session. Newest at the top.
 
+## Step 6 done — closed command registry
+
+Vess now has one closed, reusable command boundary shared by voice and the local
+web API. This pass deliberately ships only `set_color`; the model can select an
+action, but it never owns execution authority and cannot invent shell commands,
+paths, code, arbitrary RGB values, or future commands that do not have a real
+handler.
+
+### Change
+
+`brain/commands.py` owns the executable catalog, strict JSON-shape validation,
+human-authored color palette, and final execution. `OllamaClient.select_command`
+receives only that live catalog and returns untrusted JSON or `null`. The
+`ConversationWorker` runs the selector only after a cheap Python candidate gate,
+then revalidates the result through the registry before any mutation. Ordinary
+conversation goes directly through the existing chat path with no extra selector
+call.
+
+The candidate gate is intentionally narrow rather than vocabulary-based. Direct
+requests such as `turn blue`, `please change your color to blue`, and `Could you
+make yourself red?` are eligible. Conversational questions such as `why does the
+sky turn blue?` and `Can you explain why lights turn red?` are not, preventing a
+hidden Ollama latency tax on normal speech.
+
+Voice and web receive the exact same `CommandRegistry` instance. `GET /commands`
+exposes only the executable catalog; `POST /commands` goes through the same
+validator/executor as voice. Unknown commands, unknown values, malformed shapes,
+and extra fields fail closed. The older local `/color` operator endpoint remains
+separate from model authority.
+
+Generation safety is enforced at the state-commit boundary. A stale model
+selection cannot execute, and the final generation check plus the current
+`set_color` mutation are atomic under the conversation request lock. That lock
+is acceptable only because the current handler is a tiny in-memory commit;
+future slow OS actions must use a prepare/commit split rather than holding it
+around slow work. Executor failures are logged as `command_error`, finish and
+drain the generation, and do not silently fall through to ordinary chat or
+create a fake delivered-memory turn.
+
+### Verification
+
+The feature was built tests-first. Run **150** failed only because the registry
+did not exist; run **152** passed after the closed palette/executor landed. Run
+**153** failed only on the missing strict Ollama selector; run **154** passed
+after selection was added. Run **155** then exposed the missing generation-safe
+conversation wiring.
+
+Final review added three more deliberate regressions rather than trusting the
+first green implementation. Run **160** failed only because an executor error
+did not drain its generation; run **161** passed after cleanup was added. Run
+**162** failed only because a newer request could supersede a generation during
+the tiny command commit window; run **163** passed after the freshness check and
+commit became atomic. Run **164** failed only because `why does the sky turn
+blue?` incorrectly entered the command-selector path; run **165** passed after
+the candidate gate was tightened to front-loaded imperative/polite-command
+shape.
+
+Run **165** completed successfully on production head
+`ea547555ec765736c68b62254bbc700462ba886a`: the unit-test job, behavior
+verification, comprehensive eye validation, artifact upload, and failure gate
+all passed. The suite contains **263 tests** at this checkpoint.
+
+No unrestricted `subprocess`, shell, filesystem-path, code-evaluation, or raw
+model-to-executor path was introduced.
+
+### Next
+
+Continue with the next numbered task in `PLAN.md` from a fresh branch after this
+exact documentation head is verified and Step 6 is fast-forwarded into `main`.
+
 ## Expressive TTS — conservative Chatterbox first pass
 
 The sentence-level `PerformanceCue(expression, intensity)` already reached both
@@ -543,9 +613,9 @@ blocker for this image-based completion of step 2.
 
 `yolo11n.pt` (5,613,764 bytes) was downloaded from the Ultralytics GitHub
 release and loaded successfully with `ultralytics.YOLO`. It is located at
-`C:\Users\sawye\Vess\yolo11n.pt`; Ultralytics saved the relative model name in
+`C:\\Users\\sawye\\Vess\\yolo11n.pt`; Ultralytics saved the relative model name in
 the repository working directory, rather than in the previously expected
-`C:\Users\sawye\weights` folder.
+`C:\\Users\\sawye\\weights` folder.
 
 This completes only the model-download prerequisite. `Detector.detect()` has
 not been run against an image or camera yet.
@@ -650,8 +720,9 @@ physics; the multipliers are the character. A mood with no block moves exactly
 as neutral, so nothing that already existed had to change.
 
 Keys and limits: `hold` 0.25-3.0, `spread` 0.3-1.6, `ease` 0.3-3.0, `bob`
-0.0-2.0, `track_bias` 0.25-2.0, `gaze_lag` 0.0-1.0, `gaze_y_bias` -0.6-0.6,
-`track_break` 0.0-0.6. Multipliers default to 1.0, lags and biases to 0.0.
+0.0-2.0, `track_bias` 0.25-2.0, `gaze_lag` 0.0-1.0,
+`gaze_y_bias` -0.6-0.6, `track_break` 0.0-0.6. Multipliers default to 1.0,
+lags and biases to 0.0.
 
 ### Measured, 180s idle per mood
 
