@@ -21,6 +21,8 @@ Files may come from:
 
 Keep `source` accurate in the manifest. Owner speech and public speech should be reported separately when choosing Vess settings because general benchmark accuracy is not a substitute for working well for the person who actually uses Vess.
 
+Public dataset audio is local benchmark input, not repository content. The repo already ignores `*.wav`; keep downloaded/converted clips uncommitted and follow the source dataset's current license and distribution terms rather than mirroring a dataset through this repository.
+
 ## Suggested first owner recordings
 
 Start with roughly 15-25 clips, not hundreds. Add a new clip when a real failure exposes a missing case.
