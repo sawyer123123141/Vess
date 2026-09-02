@@ -160,7 +160,7 @@ class TriggerWorker:
         submit: Callable[[str, str], bool],
         event_log: Any,
         *,
-        poll_seconds: float = 1.0,
+        poll_seconds: float = 0.5,
     ) -> None:
         self._state = state
         self._decider = TriggerDecider(settings)
