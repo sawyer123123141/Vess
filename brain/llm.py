@@ -390,11 +390,13 @@ class ConversationWorker:
         *,
         performances: dict[str, dict[str, object]] | None = None,
         durable_memory: Any | None = None,
+        command_registry: Any | None = None,
     ) -> None:
         self._config = config
         self._moods = moods
         self._performances = performances
         self._durable_memory = durable_memory
+        self._command_registry = command_registry
         self._state = state
         self._event_log = event_log
         self._client = client
@@ -559,6 +561,9 @@ class ConversationWorker:
             generation_id=generation_id,
         )
         try:
+            if self._try_command(generation_id, user_request, llm_started_at):
+                return
+
             prompt = build_prompt(
                 self._config,
                 self._moods,
@@ -581,23 +586,11 @@ class ConversationWorker:
                 with self._state.locked():
                     self._state.thinking = False
                 if first_clause:
-                    first_clause_ready_at = time.perf_counter()
-                    latency_ms = (first_clause_ready_at - llm_started_at) * 1000.0
-                    rounded = round(latency_ms, 1)
-                    with self._request_lock:
-                        latency = self._latency_by_generation.get(generation_id)
-                        if (
-                            generation_id == self._latest_generation
-                            and latency is not None
-                        ):
-                            latency["first_clause_ready_at"] = first_clause_ready_at
-                            self._state.update_debug(llm_first_clause_ms=rounded)
-                    self._state.record_debug(
-                        "llm_first_clause",
-                        clause=clause.text,
-                        performance=clause.performance.expression,
-                        latency_ms=rounded,
-                        generation_id=generation_id,
+                    self._record_first_clause_ready(
+                        generation_id,
+                        clause.text,
+                        clause.performance.expression,
+                        llm_started_at,
                     )
                     first_clause = False
                 self._delivery.generated(generation_id, clause.text)
@@ -633,6 +626,121 @@ class ConversationWorker:
         finally:
             with self._state.locked():
                 self._state.thinking = False
+
+    def _try_command(
+        self,
+        generation_id: int,
+        user_request: str,
+        llm_started_at: float,
+    ) -> bool:
+        registry = self._command_registry
+        if registry is None or not registry.is_candidate(user_request):
+            return False
+
+        self._state.record_debug(
+            "command_selection_started",
+            request=user_request,
+            generation_id=generation_id,
+        )
+        try:
+            selection = self._client.select_command(
+                user_request,
+                registry.catalog(),
+                self._config,
+            )
+        except Exception as error:
+            self._state.record_debug(
+                "command_selection_error",
+                generation_id=generation_id,
+                error=str(error),
+            )
+            return False
+
+        if not self._is_latest(generation_id):
+            self._state.record_debug(
+                "stale_response_cancelled",
+                generation_id=generation_id,
+            )
+            return True
+
+        call = registry.validate(selection)
+        if call is None:
+            if selection is not None:
+                self._state.record_debug(
+                    "command_selection_rejected",
+                    generation_id=generation_id,
+                )
+            return False
+
+        if not self._is_latest(generation_id):
+            self._state.record_debug(
+                "stale_response_cancelled",
+                generation_id=generation_id,
+            )
+            return True
+
+        try:
+            result = registry.execute(call)
+        except Exception as error:
+            payload = {"name": call.name, "error": str(error)}
+            self._event_log.append("command_error", payload)
+            self._state.record_debug(
+                "command_error",
+                generation_id=generation_id,
+                **payload,
+            )
+            return True
+
+        self._event_log.append("command_executed", result.event_payload)
+        self._state.record_debug(
+            "command_executed",
+            generation_id=generation_id,
+            **result.event_payload,
+        )
+        with self._state.locked():
+            self._state.thinking = False
+        self._record_first_clause_ready(
+            generation_id,
+            result.spoken_response,
+            "neutral",
+            llm_started_at,
+        )
+        self._delivery.generated(generation_id, result.spoken_response)
+        if self._performances is None:
+            self._voice.enqueue(result.spoken_response, generation_id=generation_id)
+        else:
+            self._voice.enqueue(
+                result.spoken_response,
+                generation_id=generation_id,
+                performance=PerformanceCue(),
+            )
+        self._delivery.llm_finished(generation_id)
+        self._voice.finish_generation(generation_id)
+        self._state.record_debug("llm_complete", generation_id=generation_id)
+        return True
+
+    def _record_first_clause_ready(
+        self,
+        generation_id: int,
+        clause: str,
+        performance: str,
+        llm_started_at: float,
+    ) -> None:
+        first_clause_ready_at = time.perf_counter()
+        latency_ms = (first_clause_ready_at - llm_started_at) * 1000.0
+        rounded = round(latency_ms, 1)
+        with self._request_lock:
+            latency = self._latency_by_generation.get(generation_id)
+            if generation_id == self._latest_generation and latency is not None:
+                latency["first_clause_ready_at"] = first_clause_ready_at
+                self._state.update_debug(llm_first_clause_ms=rounded)
+        self._state.record_debug(
+            "llm_first_clause",
+            clause=clause,
+            performance=performance,
+            latency_ms=rounded,
+            generation_id=generation_id,
+        )
 
     def _record_tts_latency(
         self,
