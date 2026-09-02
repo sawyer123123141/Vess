@@ -6,7 +6,13 @@ import argparse
 from copy import deepcopy
 import json
 from pathlib import Path
+import sys
 from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from performance import PerformanceCue
 from tools.benchmark_tts import run_benchmark, write_results
@@ -14,9 +20,6 @@ from voice_lab.corpus import load_manifest, read_wav
 from voice_lab.endpointing import replay_endpoint
 from voice_lab.tts import measure_cancellation
 from voice_lab.whisper import measure_transcription
-
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def artifact_path(root: Path, experiment: str, *parts: str) -> Path:
