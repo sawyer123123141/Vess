@@ -7,6 +7,7 @@ from typing import Any
 
 
 _CONTROL_VERBS = {"change", "make", "set", "turn"}
+_POLITE_AUXILIARIES = {"can", "could", "will", "would"}
 
 
 @dataclass(frozen=True)
@@ -63,8 +64,11 @@ class CommandRegistry:
 
     def is_candidate(self, text: str) -> bool:
         """Cheaply reject ordinary conversation before any command-model call."""
-        tokens = set(_tokens(text))
-        return bool(tokens & _CONTROL_VERBS) and bool(tokens & self._colors.keys())
+        tokens = _tokens(text)
+        verb_index = _command_verb_index(tokens)
+        if verb_index is None:
+            return False
+        return any(token in self._colors for token in tokens[verb_index + 1 :])
 
     def validate(self, payload: object) -> CommandCall | None:
         """Accept only the exact declared set_color shape and allowlisted value."""
@@ -97,6 +101,26 @@ class CommandRegistry:
             spoken_response=f"{color_name.capitalize()}.",
             event_payload={"name": "set_color", "arguments": arguments},
         )
+
+
+def _command_verb_index(tokens: list[str]) -> int | None:
+    """Return an imperative control verb near the front of a command-like utterance."""
+    index = 0
+    if index < len(tokens) and tokens[index] == "please":
+        index += 1
+
+    if (
+        index + 1 < len(tokens)
+        and tokens[index] in _POLITE_AUXILIARIES
+        and tokens[index + 1] == "you"
+    ):
+        index += 2
+        if index < len(tokens) and tokens[index] == "please":
+            index += 1
+
+    if index < len(tokens) and tokens[index] in _CONTROL_VERBS:
+        return index
+    return None
 
 
 def _tokens(value: str) -> list[str]:
