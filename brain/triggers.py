@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 
 @dataclass(frozen=True)
@@ -146,3 +148,93 @@ class TriggerDecider:
         if after < before:
             return after <= hour < before
         return hour >= after or hour < before
+
+
+class TriggerWorker:
+    """Poll State off the render thread and submit only eligible proactive events."""
+
+    def __init__(
+        self,
+        state: Any,
+        settings: dict[str, Any],
+        submit: Callable[[str, str], bool],
+        event_log: Any,
+        *,
+        poll_seconds: float = 1.0,
+    ) -> None:
+        self._state = state
+        self._decider = TriggerDecider(settings)
+        self._submit = submit
+        self._event_log = event_log
+        self._poll_seconds = max(float(poll_seconds), 0.001)
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @property
+    def is_running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def snapshot(self) -> TriggerSnapshot:
+        with self._state.locked():
+            return TriggerSnapshot(
+                person_present=self._state.person_present,
+                present_since=self._state.present_since,
+                last_interaction=self._state.last_interaction,
+                muted_until=self._state.muted_until,
+                listening=self._state.listening,
+                thinking=self._state.thinking,
+                speaking=self._state.speaking,
+            )
+
+    def poll_once(
+        self,
+        *,
+        now: float | None = None,
+        local_hour: int | None = None,
+    ) -> TriggerEvent | None:
+        current_time = time.time() if now is None else float(now)
+        hour = time.localtime(current_time).tm_hour if local_hour is None else int(local_hour)
+        event = self._decider.evaluate(
+            self.snapshot(),
+            now=current_time,
+            local_hour=hour,
+        )
+        if event is None:
+            return None
+        if not self._submit(event.name, event.context):
+            return event
+
+        self._decider.accept(event, current_time)
+        self._event_log.append(
+            "trigger_fired",
+            {
+                "trigger": event.name,
+                "context": event.context,
+                "duration_seconds": event.duration_seconds,
+            },
+        )
+        return event
+
+    def start(self) -> None:
+        if self.is_running:
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="triggers",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def close(self) -> None:
+        thread = self._thread
+        if thread is None:
+            return
+        self._stop.set()
+        thread.join()
+        self._thread = None
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self.poll_once()
+            self._stop.wait(self._poll_seconds)
