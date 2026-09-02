@@ -53,6 +53,7 @@ class State:
     speaking: bool = False
     muted_until: float = 0.0
     last_spoke: float = 0.0
+    last_interaction: float = 0.0
 
     # Local-only operator diagnostics. These are not Vess memory.
     debug_values: dict[str, object] = field(default_factory=dict, repr=False)
