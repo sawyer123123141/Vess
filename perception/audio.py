@@ -191,6 +191,7 @@ class AudioLoop:
         self._capture_sequence = 0
         self._last_capture_sequence: int | None = None
         self._audio_blocks_dropped = 0
+        self._state.update_debug(audio_blocks_dropped=0)
 
         self._blocks: queue.Queue[CapturedAudioBlock | np.ndarray | None] = queue.Queue(
             maxsize=16
@@ -835,7 +836,7 @@ def _make_transcriber(config: dict[str, Any]) -> Callable[[np.ndarray], str]:
         segments, _ = model.transcribe(
             samples,
             language=settings.get("language", "en"),
-            beam_size=int(settings.get("beam_size", 1)),
+            beam_size=int(settings.get("beam_size", 5)),
             condition_on_previous_text=bool(
                 settings.get("condition_on_previous_text", False)
             ),

@@ -354,6 +354,7 @@ class ConversationWorker:
             latency = dict(timing or {})
             latency["first_clause_ready_at"] = None
             latency["playback_reported"] = False
+            latency["first_tts_synthesis_reported"] = False
             self._latency_by_generation[generation_id] = latency
 
             self._pending_request_key = key
@@ -398,6 +399,7 @@ class ConversationWorker:
 
     def handle_delivery(self, event_type: str, payload: dict[str, object]) -> None:
         """Forward physical voice lifecycle receipts into delivered-memory accounting."""
+        self._record_tts_latency(event_type, payload)
         self._record_playback_latency(event_type, payload)
         self._delivery.handle(event_type, payload)
         if event_type == "generation_playback_drained":
@@ -523,6 +525,38 @@ class ConversationWorker:
             with self._state.locked():
                 self._state.thinking = False
 
+    def _record_tts_latency(
+        self,
+        event_type: str,
+        payload: dict[str, object],
+    ) -> None:
+        if event_type != "clause_synthesized":
+            return
+        generation_id = payload.get("generation_id")
+        worker_wait_ms = payload.get("worker_wait_ms")
+        synthesis_ms = payload.get("synthesis_ms")
+        if (
+            not isinstance(generation_id, int)
+            or not isinstance(worker_wait_ms, (int, float))
+            or not isinstance(synthesis_ms, (int, float))
+        ):
+            return
+
+        with self._request_lock:
+            if generation_id != self._latest_generation:
+                return
+            latency = self._latency_by_generation.get(generation_id)
+            if (
+                latency is None
+                or latency.get("first_tts_synthesis_reported") is True
+            ):
+                return
+            latency["first_tts_synthesis_reported"] = True
+            self._state.update_debug(
+                tts_worker_wait_ms=round(max(float(worker_wait_ms), 0.0), 1),
+                tts_first_synthesis_ms=round(max(float(synthesis_ms), 0.0), 1),
+            )
+
     def _record_playback_latency(
         self,
         event_type: str,
@@ -590,6 +624,8 @@ class ConversationWorker:
             latency_timing_valid=bool(latency.get("latency_timing_valid", False)),
             latency_playback_marker="pre_delivery_callback",
             llm_first_clause_ms=None,
+            tts_worker_wait_ms=None,
+            tts_first_synthesis_ms=None,
             tts_first_audio_ms=None,
             speech_end_to_playback_ms=None,
         )

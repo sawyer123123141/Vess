@@ -57,7 +57,14 @@ class VoiceOutput:
         self._on_delivery = on_delivery
 
         self._queue: queue.Queue[
-            tuple[str, str | None, int | None, PerformanceCue] | None
+            tuple[
+                str,
+                str | None,
+                int | None,
+                PerformanceCue,
+                float | None,
+            ]
+            | None
         ] = queue.Queue()
         self._ready_queue: queue.Queue[
             tuple[
@@ -120,23 +127,34 @@ class VoiceOutput:
         performance: PerformanceCue | None = None,
     ) -> None:
         """Queue text and its transient performance cue for synthesis."""
-        self._queue.put(("speak", text, generation_id, performance or PerformanceCue()))
+        queued_at = time.perf_counter()
+        self._queue.put(
+            (
+                "speak",
+                text,
+                generation_id,
+                performance or PerformanceCue(),
+                queued_at,
+            )
+        )
         self._state.update_debug(tts_queue=self._queue.qsize())
 
     def prepare_acknowledgement(self, text: str = "Yeah?") -> None:
         """Cache a short acknowledgement in the synthesis worker."""
         self._acknowledgement = text
-        self._queue.put(("prepare", text, None, PerformanceCue()))
+        self._queue.put(("prepare", text, None, PerformanceCue(), None))
         self._state.update_debug(tts_queue=self._queue.qsize())
 
     def enqueue_acknowledgement(self, generation_id: int | None = None) -> None:
         """Queue the prepared acknowledgement if it is still current."""
-        self._queue.put(("acknowledgement", None, generation_id, PerformanceCue()))
+        self._queue.put(
+            ("acknowledgement", None, generation_id, PerformanceCue(), None)
+        )
         self._state.update_debug(tts_queue=self._queue.qsize())
 
     def finish_generation(self, generation_id: int) -> None:
         """Queue an ordered marker that fires after all preceding speech drains."""
-        self._queue.put(("finish", None, generation_id, PerformanceCue()))
+        self._queue.put(("finish", None, generation_id, PerformanceCue(), None))
         self._state.update_debug(tts_queue=self._queue.qsize())
 
     def pause_for_interruption(self) -> PlaybackReceipt | None:
@@ -227,7 +245,7 @@ class VoiceOutput:
             item = self._queue.get()
             if item is None:
                 return
-            kind, text, generation_id, performance = item
+            kind, text, generation_id, performance, queued_at = item
             self._state.update_debug(tts_queue=self._queue.qsize())
             if kind != "prepare" and self._is_stale(generation_id):
                 self._record_stale_skip(generation_id, stage="queued")
@@ -243,6 +261,7 @@ class VoiceOutput:
                     text or "",
                     generation_id=generation_id,
                     performance=performance,
+                    queued_at=queued_at,
                 )
 
     def _playback_run(self) -> None:
@@ -341,6 +360,8 @@ class VoiceOutput:
         text: str,
         generation_id: int | None = None,
         performance: PerformanceCue | None = None,
+        *,
+        queued_at: float | None = None,
     ) -> None:
         if not self._reserve_ready_slot(generation_id):
             return
@@ -348,6 +369,9 @@ class VoiceOutput:
         cue = performance or PerformanceCue()
         self._state.record_debug("tts_started", text=text)
         synthesis_started = time.perf_counter()
+        worker_wait_ms = None
+        if queued_at is not None:
+            worker_wait_ms = max(synthesis_started - queued_at, 0.0) * 1000.0
         try:
             result = self._synthesize_text(text, cue)
         except Exception as error:
@@ -356,11 +380,21 @@ class VoiceOutput:
             self._state.record_debug("tts_error", error=str(error), text=text)
             return
 
-        synthesis_ms = (time.perf_counter() - synthesis_started) * 1000.0
+        synthesis_finished = time.perf_counter()
+        synthesis_ms = (synthesis_finished - synthesis_started) * 1000.0
         if self._is_stale(generation_id):
             self._ready_slots.release()
             self._record_stale_skip(generation_id, stage="after_synthesis")
             return
+
+        if isinstance(generation_id, int) and worker_wait_ms is not None:
+            self._emit_delivery(
+                "clause_synthesized",
+                generation_id=generation_id,
+                text=text,
+                worker_wait_ms=round(worker_wait_ms, 1),
+                synthesis_ms=round(synthesis_ms, 1),
+            )
 
         sample_rate = result.sample_rate
         raw_edge_silence = _waveform_edge_silence_ms(result.audio, sample_rate)

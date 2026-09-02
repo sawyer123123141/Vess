@@ -27,7 +27,7 @@
     "cpu_threads": 0,
     "num_workers": 1,
     "language": "en",
-    "beam_size": 1,
+    "beam_size": 5,
     "condition_on_previous_text": false,
     "vad_filter": true
   },
