@@ -94,6 +94,16 @@
     "discord": "",
     "vscode": ""
   },
+  "commands": {
+    "colors": {
+      "blue": [100, 180, 255],
+      "red": [255, 100, 90],
+      "green": [110, 220, 140],
+      "purple": [180, 130, 255],
+      "orange": [255, 170, 80],
+      "white": [240, 240, 240]
+    }
+  },
   "web": {
     "enabled": true,
     "port": 8080,
