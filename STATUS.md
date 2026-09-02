@@ -2,6 +2,75 @@
 
 Update this at the end of every session. Newest at the top.
 
+## Voice Lab — repeatable local voice benchmarks
+
+The manual voice-latency workflow had become its own bottleneck: each experiment
+required pulling code, editing config, restarting Vess, recreating speech timing
+by hand, and pasting `/debug`. Several stale-TTS checks then exercised different
+queue states simply because a human could not reliably hit a
+few-hundred-millisecond synthesis window. Voice Lab makes the objective parts of
+those experiments deterministic and repeatable instead.
+
+### Change
+
+`voice_lab/` now provides reusable local benchmark logic:
+
+- a strict manifest plus mono 16 kHz PCM16 WAV corpus loader
+- offline endpoint replay through the production `UtteranceAssembler`
+- Whisper word-error-rate, transcription-latency, and realtime-factor metrics
+- cancellable-TTS `release_ms_after_cancel` timing
+- one `tools/voice_lab.py` CLI with `endpoint`, `whisper`, `tts`, and `cancel`
+  subcommands
+
+Settings sweeps deep-copy configuration and never mutate `config.json`.
+`tools/benchmark_tts.py` remains the low-level synthesis benchmark and now
+accepts a caller-selected output directory plus optional `PerformanceCue`
+metadata. Voice Lab results live under ignored `artifacts/voice-lab/`.
+
+`voice_corpus/` documents an owner-first corpus and includes a manifest example.
+WAV/MP3 files remain ignored. Public-dataset clips are local benchmark inputs,
+not repository content; their `source` stays explicit so owner speech and public
+speech are not collapsed into one misleading score.
+
+`PLAN.md` now explicitly schedules voice work as **Voice Lab -> expressive TTS
+-> endpoint/Whisper/TTS optimization**. Expressive TTS must consume the same
+per-clause `PerformanceCue(expression, intensity)` already driving the face,
+not a second emotion classifier.
+
+### Verification
+
+Tests were written before implementation. Tests-only commit
+`c82b26bf6572c9dd5e42b15333ccd075ede5eda7` produced GitHub Actions run **113**:
+**209 tests** ran, and only the five new Voice Lab modules failed to import;
+the existing **204** tests stayed green.
+
+Implementation commit `7e6c6e1695d12dcaad970d5efefd5baaef3f8778`
+added the corpus, endpoint, Whisper, cancellation, and CLI paths. Actions run
+**114** passed the unit-test job, behavior verification, and comprehensive eye
+validation. A later direct-launch regression deliberately executed
+`python tools/voice_lab.py --help` from the repository root. Commit
+`ff13011a3f1708e8c7fbc7f3ffb9567cbf6f49d5` exposed the missing repo-root import
+bootstrap in run **118**, whose only failure was that new test with
+`ModuleNotFoundError: performance`. Commit
+`9039a0b3dbcdd7b9f7f74dbf2697a1d86ce855d7` applied the same root-bootstrap
+pattern already used by the other repository tools; run **121** then passed the
+unit-test job, behavior verification, and comprehensive eye validation.
+
+A production diff review found Voice Lab isolated to the new developer package,
+`tools/voice_lab.py`, and a backward-compatible extension of
+`tools/benchmark_tts.py`. No live audio loop, LLM, State, playback, or
+`config.json` behavior changed.
+
+### Next real-machine use
+
+Pull the feature branch and build the initial **15-25 owner-WAV corpus** using
+normal speech rather than benchmark-announcer delivery. Copy/edit
+`voice_corpus/manifest.example.json`, then use Voice Lab to compare endpoint
+thresholds and Whisper beam variants against identical recordings. The real
+Chatterbox `cancel` and `tts` commands then measure the RTX 3070 directly. CI
+intentionally does not load Whisper or Chatterbox, so those hardware numbers
+remain a local measurement rather than a simulated claim.
+
 ## Stale TTS preemption — cancel obsolete Chatterbox generation
 
 Real-PC rapid-follow-up telemetry exposed a concrete head-of-line delay: a new
