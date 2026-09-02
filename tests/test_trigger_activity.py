@@ -25,7 +25,7 @@ class TriggerActivityTests(unittest.TestCase):
             RecordingVoice(),
         )
 
-        with patch("brain.proactive.time.time", side_effect=[100.0, 200.0]):
+        with patch("brain.proactive.time.time", side_effect=[100.0, 200.0, 999.0]):
             worker.submit("hello")
             self.assertEqual(state.last_interaction, 100.0)
             worker.submit("hello")
