@@ -422,6 +422,32 @@ Perceived speed matters more than model quality for presence.
   pre-rendered audio, played instantly while the real response generates
 - **Show thinking** — eyes drift, slow pulse. Makes a pause feel intentional
 
+### Voice development workflow
+
+Voice behavior is now tuned through the developer-only **Voice Lab** rather
+than by repeatedly editing `config.json`, restarting Vess, and trying to
+recreate the same spoken timing by hand. The lab replays a fixed local corpus
+through the production endpointing/Whisper/TTS paths and keeps objective
+results under `artifacts/voice-lab/`. Corpus WAVs may come from the owner's mic,
+synthetic fixtures, or converted public speech datasets; benchmark code itself
+does not download or silently resample them.
+
+Current voice work order:
+
+1. **Voice Lab** — repeatable endpoint, Whisper, TTS, and cancellation tests.
+2. **Expressive TTS** — the existing per-clause `PerformanceCue(expression,
+   intensity)` must drive spoken delivery as well as the face. Do not create a
+   second emotion classifier just for speech. Expression must remain subtle;
+   paralinguistic tags or stronger delivery are chosen only when the cue and
+   line warrant them, not mechanically for every mood.
+3. **Endpointing / Whisper / TTS optimization** — compare candidates against
+   the same corpus and real-hardware distributions before changing defaults.
+
+Expressive speech is judged with both objective Voice Lab metrics and human
+A/B listening. The lab may prove latency, cancellation, consistency, and file
+identity; it must not invent a numeric "naturalness" score and pretend that
+replaces listening.
+
 ---
 
 ## Build order
