@@ -2,6 +2,72 @@
 
 Update this at the end of every session. Newest at the top.
 
+## Stale TTS preemption — cancel obsolete Chatterbox generation
+
+Real-PC rapid-follow-up telemetry exposed a concrete head-of-line delay: a new
+response measured **700.6 ms** of `tts_worker_wait_ms` while an obsolete
+Chatterbox generation was still synthesizing. The current generation's own
+first synthesis then took **627.6 ms**. Debug events showed generation 6 being
+skipped only `after_synthesis`/`queued`, proving that generation invalidation
+could discard stale results but could not stop the synchronous Chatterbox
+`generate(text)` already occupying the single synthesis worker.
+
+The same microphone experiment also rejected `audio.silence_seconds = 0.30`
+for normal use: a natural hesitation was finalized before the speaker could get
+the intended thought out. The repository remains at **0.45**; do not treat the
+~150 ms endpoint reduction from 0.30 as a free latency win.
+
+### Change
+
+`VoiceOutput` now passes a generation-staleness callback only to TTS engines
+that expose an optional `synthesize_cancellable(...)` entry point. Ordinary
+engines and the legacy synthesis callable retain their existing blocking
+contract, so their worker-wait telemetry remains truthful.
+
+`ChatterboxTurboEngine` implements that optional path without loading a second
+model or running concurrent GPU synthesis. It checks cancellation before work,
+at each safe transformer forward boundary during Turbo speech-token generation,
+before the S3Gen flow/vocoder stages, and once more after generation. A
+`SynthesisCancelled` exception unwinds obsolete work back to the existing
+serial worker. `VoiceOutput` records this as `stale_tts_skipped` with stage
+`during_synthesis`; cooperative cancellation is not a `voice_error`.
+
+This is cooperative rather than magical GPU preemption. A CUDA kernel already
+executing cannot be interrupted halfway through by Python. The obsolete turn
+stops at the next checked Python/module boundary, so the real reduction in
+`tts_worker_wait_ms` still requires hardware measurement.
+
+### Verification
+
+Tests were written before production code. Commit
+`402408f143d8c8aa366e7d3631eb2c33ab0b1f53` added two regressions: a newer
+generation must start without waiting for an obsolete cancellable synthesis,
+and the Chatterbox adapter must abort inside its token loop and remove its
+cancellation hook. GitHub Actions run **107** ran **204 tests** and failed only
+those two new expectations.
+
+Production commit `e0e5134380b583115c5a971475d3e9eb9712247c` added the
+cooperative cancellation path. GitHub Actions run **108** then ran **204/204
+unit tests** successfully, followed by successful behavior verification and
+comprehensive eye validation. The older regression that intentionally uses an
+uncancellable/legacy synthesis call still passes, confirming worker-wait
+telemetry was not weakened to manufacture a green result.
+
+A production diff review found only `output/tts/base.py` (+4),
+`output/tts/chatterbox_turbo.py` (+61/-2), and `output/voice.py` (+15/-2).
+There are no config, delivery-ledger, playback, memory, or queue-policy changes,
+and the physical `on_delivery` lifecycle boundary remains untouched.
+
+### Next hardware check
+
+Pull the feature branch, ensure local `audio.silence_seconds` is back at
+**0.45**, restart Vess, and create several rapid follow-ups while an earlier
+response is still being synthesized. A successful preemption should produce
+`stale_tts_skipped` with `stage = "during_synthesis"` and materially reduce the
+new generation's `tts_worker_wait_ms` from the measured **700.6 ms** case. Do
+not assume a particular residual delay because it depends on which Chatterbox
+stage or CUDA kernel was active when the generation changed.
+
 ## First-clause TTS latency pass — early balanced comma
 
 Real-PC telemetry with `audio.silence_seconds` temporarily set to **0.30**
@@ -450,7 +516,7 @@ Keys and limits: `hold` 0.25-3.0, `spread` 0.3-1.6, `ease` 0.3-3.0, `bob`
 ### Measured, 180s idle per mood
 
 | mood    | snaps | face x range | gaze reach | mean gaze y | settle into thinking |
-|---------|-------|--------------|------------|-------------|----------------------|
+|---------|-------|--------------|------------|----------------------|
 | neutral | 72    | 3.38px       | 1.00       | -0.06       | 1.10s                |
 | happy   | 86    | 3.40px       | 1.00       | +0.02       | 0.77s                |
 | sad     | 0     | 2.71px       | 0.80       | **+0.40**   | 2.13s                |
