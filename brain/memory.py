@@ -205,7 +205,8 @@ class FactMemory:
                     )
                     candidates = self._extractor(text, known)
                     now = time.time()
-                    for candidate in candidates[:3]:
+                    stored = 0
+                    for candidate in candidates:
                         clean = _validated_candidate(candidate)
                         if clean is None:
                             continue
@@ -221,6 +222,9 @@ class FactMemory:
                             """,
                             (clean.key, clean.value, text, now, now),
                         )
+                        stored += 1
+                        if stored >= 3:
+                            break
                     connection.commit()
                 except Exception:
                     connection.rollback()
