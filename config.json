@@ -83,6 +83,7 @@
   },
   "triggers": {
     "min_absence_hours": 4,
+    "idle_interaction_minutes": 30,
     "cooldown_minutes": 60,
     "quiet_after_hour": 22,
     "quiet_before_hour": 8
