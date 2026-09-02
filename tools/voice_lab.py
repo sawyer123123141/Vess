@@ -49,6 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
     tts = subparsers.add_parser("tts", help="run the standard TTS benchmark")
     tts.add_argument("--engine", default="chatterbox_turbo")
     tts.add_argument("--runs", type=int, default=3)
+    tts.add_argument("--expression", default="neutral")
+    tts.add_argument("--intensity", type=float, default=0.0)
 
     cancel = subparsers.add_parser("cancel", help="measure stale TTS release latency")
     cancel.add_argument("--engine", default="chatterbox_turbo")
@@ -135,8 +137,16 @@ def _run_whisper(args: argparse.Namespace) -> int:
 def _run_tts(args: argparse.Namespace) -> int:
     if args.runs < 1:
         raise ValueError("runs must be at least 1")
+    if not 0.0 <= args.intensity <= 1.0:
+        raise ValueError("intensity must be between 0 and 1")
     destination = artifact_path(ROOT / "artifacts", "tts", args.engine)
-    return run_benchmark(args.engine, args.runs, destination)
+    cue = PerformanceCue(args.expression, float(args.intensity))
+    return run_benchmark(
+        args.engine,
+        args.runs,
+        destination,
+        performance=cue,
+    )
 
 
 def _run_cancel(args: argparse.Namespace) -> int:
