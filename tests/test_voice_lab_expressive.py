@@ -28,7 +28,7 @@ class VoiceLabExpressiveTests(unittest.TestCase):
         self.assertEqual(args.expression, "playful")
         self.assertEqual(args.intensity, 0.65)
 
-    def test_tts_command_forwards_performance_cue_to_benchmark(self) -> None:
+    def test_tts_command_forwards_cue_and_keeps_expressive_artifacts_separate(self) -> None:
         args = build_parser().parse_args(
             [
                 "tts",
@@ -50,6 +50,10 @@ class VoiceLabExpressiveTests(unittest.TestCase):
         call = benchmark.call_args
         self.assertEqual(call.args[0], "chatterbox_turbo")
         self.assertEqual(call.args[1], 2)
+        self.assertEqual(
+            call.args[2].parts[-2:],
+            ("chatterbox_turbo", "playful-0.65"),
+        )
         self.assertEqual(call.kwargs["performance"], PerformanceCue("playful", 0.65))
 
 
