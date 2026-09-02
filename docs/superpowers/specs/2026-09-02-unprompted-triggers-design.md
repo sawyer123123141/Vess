@@ -37,6 +37,14 @@ Extend `config.triggers` with:
 
 Existing values stay authoritative. `idle_interaction_minutes` means time since meaningful Vess interaction, not acoustic silence in the room.
 
+## User-activity clock
+
+Add `State.last_interaction: float = 0.0` as the one shared timestamp for accepted user interaction.
+
+Ordinary `ConversationWorker.submit(...)` / `submit_with_timing(...)` update this timestamp as soon as a real user request is accepted for handling, including an empty wake acknowledgement. Duplicate submissions still count as interaction even if they collapse to the already-active request. Proactive submissions never update it.
+
+This field is intentionally separate from `state.last_spoke`. `last_spoke` means Vess physically produced audible output, including proactive output, so using it to reset the quiet trigger would allow Vess to restart its own idle timer and eventually talk again without the person ever responding.
+
 ## Trigger decision model
 
 `brain/triggers.py` owns the decision. It has no LLM dependency.
@@ -71,17 +79,23 @@ It must not claim to know where the person went or what they did.
 
 ### Quiet interaction
 
-"Quiet" means no delivered interaction with Vess, not no sound in the room.
+"Quiet" means no interaction with Vess, not no sound in the room.
 
-The activity baseline is the newest of:
+The idle baseline is the newer of:
 
-- `state.last_spoke`
-- the timestamp of the newest short-term conversation turn
+- `state.last_interaction`
 - `state.present_since`
 
-That means a newly detected person gets a fresh idle window rather than an immediate quiet trigger.
+That means a newly detected person gets a fresh idle window rather than an immediate quiet trigger, and a user request resets the window immediately rather than waiting for the response to finish playing.
 
-After `idle_interaction_minutes`, the trigger may fire once for that continuous idle stretch. It does not repeat every N minutes. The one-shot latch resets only when activity advances or a genuine absence/return cycle starts a new presence stretch.
+After `idle_interaction_minutes`, the trigger may fire once for that continuous no-interaction stretch. It does not repeat every N minutes.
+
+More conservatively, once *any* proactive line has been accepted during the current no-interaction stretch — whether it came from the return trigger or quiet trigger — Vess stays proactively silent until either:
+
+- the user interacts again (`state.last_interaction` advances), or
+- the person genuinely leaves and a new presence stretch begins.
+
+This prevents a return greeting followed an hour later by a quiet-time remark when the person never responded.
 
 The event context is intentionally plain, for example:
 
@@ -132,7 +146,7 @@ This preserves the rule that only actual user statements may become durable user
 
 The trigger worker tracks the most recent successfully accepted proactive trigger time. The global `cooldown_minutes` applies across both trigger types.
 
-A trigger that fails to submit because conversation work appeared concurrently does not consume the cooldown. A successfully accepted proactive generation does consume it even if a newer user request later supersedes it; this avoids immediate retry loops.
+A trigger that fails to submit because conversation work appeared concurrently does not consume the cooldown or the one-proactive-per-idle-stretch latch. A successfully accepted proactive generation consumes both even if a newer user request later supersedes it; this avoids immediate retry loops.
 
 ## Runtime lifecycle
 
@@ -167,11 +181,13 @@ Tests-first coverage must prove:
 - startup while absent does not manufacture an absence duration
 - observed leave/return below threshold does nothing
 - observed leave/return above threshold produces exactly one return event
-- quiet interaction fires once per idle stretch and resets after real activity
+- ordinary user submission updates `state.last_interaction`; proactive submission does not
+- quiet interaction fires once per no-interaction stretch and resets only after user interaction or a new presence stretch
+- a successful return trigger prevents a later quiet trigger until the user interacts or leaves
 - quiet interaction never fires while person is absent
 - quiet hours, mute, busy state, and global cooldown suppress both trigger types
-- a failed proactive submission does not consume cooldown
-- a successful proactive submission does consume cooldown
+- a failed proactive submission does not consume cooldown or the one-shot latch
+- a successful proactive submission consumes both
 - proactive submission never replaces an already active/pending user request
 - a later real user request can supersede proactive generation
 - proactive prompt labels event context as observation, not user speech
