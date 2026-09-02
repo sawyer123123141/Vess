@@ -267,6 +267,37 @@ class OllamaClient:
         candidate = str(body.get("response", "")).strip().lower()
         return candidate if candidate in mood_names else None
 
+    def select_command(
+        self,
+        transcript: str,
+        catalog: dict[str, object],
+        config: dict[str, Any],
+    ) -> dict[str, object] | None:
+        """Ask the local model to select, but never authorize, a registry command."""
+        catalog_json = json.dumps(catalog, sort_keys=True)
+        prompt = (
+            "Select a command only when the user is instructing Vess itself to perform "
+            "one of the available actions. Otherwise return JSON null. Return JSON only: "
+            "either one object with exactly the fields name and arguments, or null. Do not "
+            "invent commands, arguments, values, shell text, paths, or code.\n"
+            f"Available command catalog: {catalog_json}\n"
+            f"User utterance: {transcript}"
+        )
+        payload = self._payload(prompt, config, stream=False)
+        payload["format"] = "json"
+        response = self._open(payload)
+        try:
+            body = json.loads(response.read())
+        finally:
+            response.close()
+        if "error" in body:
+            raise RuntimeError(str(body["error"]))
+        try:
+            decoded = json.loads(str(body.get("response", "")))
+        except (json.JSONDecodeError, TypeError):
+            return None
+        return decoded if isinstance(decoded, dict) else None
+
     def extract_facts(
         self,
         transcript: str,
