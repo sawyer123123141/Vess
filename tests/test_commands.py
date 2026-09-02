@@ -41,6 +41,8 @@ class CommandRegistryTests(unittest.TestCase):
         self.assertTrue(self.registry.is_candidate("Could you make yourself red?"))
         self.assertTrue(self.registry.is_candidate("please change your color to blue"))
         self.assertFalse(self.registry.is_candidate("why is the sky blue?"))
+        self.assertFalse(self.registry.is_candidate("why does the sky turn blue?"))
+        self.assertFalse(self.registry.is_candidate("Can you explain why lights turn red?"))
         self.assertFalse(self.registry.is_candidate("blue is my favorite color"))
         self.assertFalse(self.registry.is_candidate("turn green"))
 
