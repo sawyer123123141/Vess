@@ -2,6 +2,77 @@
 
 Update this at the end of every session. Newest at the top.
 
+## Expressive TTS — conservative Chatterbox first pass
+
+The sentence-level `PerformanceCue(expression, intensity)` already reached both
+the face and the selected TTS engine, but Chatterbox Turbo ignored it and sent
+only the raw clause text to `model.generate()`. This pass makes spoken delivery
+consume that existing cue without inventing a second emotion classifier.
+
+### Change
+
+The live Chatterbox mapping is deliberately narrow. A non-empty clause tagged
+`playful` at intensity **0.60 or higher** receives one trailing `[chuckle]` token
+before Turbo synthesis. Neutral delivery, low-intensity playful delivery,
+unknown labels, and every other current performance label keep the original text
+unchanged. Normal and cancellable synthesis use the same preparation function,
+so stale-generation preemption cannot silently produce a different speaking
+style.
+
+This is intentionally not a general `mood -> sound effect` table. Turbo clearly
+supports paralinguistic tokens such as `[chuckle]`, but the broader tokenizer
+also contains style-looking tokens whose practical behavior is less clearly
+specified. Those remain Voice Lab experiments until real A/B listening shows
+that they improve this voice. In particular, `sympathetic -> [sigh]` and
+`curious -> [gasp]` are not being added merely because the tokens exist.
+
+`tools/voice_lab.py tts` now accepts `--expression` and `--intensity`, forwards
+one explicit `PerformanceCue` through the existing benchmark, and writes each
+variant to its own directory such as
+`artifacts/voice-lab/tts/chatterbox_turbo/playful-0.65/`. Neutral and expressive
+runs therefore cannot overwrite each other's WAVs or JSON results.
+
+### Verification
+
+Tests were written before production code. The tests-only head
+`100dae479ecca67fa5efd0b30449eda114c3cb2a` produced Actions run **125**. The
+existing suite remained green while the new expressive adapter, benchmark, and
+Voice Lab expectations failed because cue-driven text preparation and benchmark
+arguments did not exist yet.
+
+Production commits `df73ea0a5a0636e410b3202bcdceac6bc7456c9b`,
+`7857fcd8bd882d4e887e095106b5dc3174e7bc93`, and
+`566313d3ff056b2c2ec4597f3f9037337513fc30` implemented the adapter and lab
+plumbing. Run **128** then exposed one older structural test whose expected call
+still encoded the pre-expressive contract (`second` rather than
+`second [chuckle]`). The runtime behavior and every new regression were already
+green, so commit `5af44ab804853a53c2892976ac907c9baea5f230` updated only that stale contract.
+Run **129** passed unit tests, behavior verification, and comprehensive eye
+validation.
+
+A final tests-first check noticed that neutral and expressive Voice Lab runs
+would otherwise overwrite the same output directory. Commit
+`f8d07c45f13f1030674b67f9ff027d10a4469da2` added that failing artifact-path
+expectation; Actions run **130** failed only that one test. Commit
+`ce8955eaec61b7741adc413e014d1d4d4157850a` separated results by
+`expression-intensity`; run **131** then passed unit tests, behavior verification,
+and comprehensive eye validation.
+
+A base-to-head review from the completed Voice Lab head
+`c60c6ba064d80c4a104ef12295380a5735900fe5` found changes only in the Chatterbox
+adapter, Voice Lab/TTS benchmark plumbing, and expressive tests. No LLM prompt,
+endpointing, queue policy, playback lifecycle, face behavior, or `config.json`
+changed.
+
+### Next real-machine check
+
+Generate matching neutral and playful benchmark WAVs on the real Chatterbox
+runtime and listen blind enough to answer the question CI cannot: does the
+chuckle actually make Vess feel more alive, or merely make every playful line
+sound performative? The current mapping is intentionally easy to remove or
+narrow if repeated playful clauses make the effect annoying. Do not expand to
+more expressive tokens until that A/B evidence exists.
+
 ## Voice Lab — repeatable local voice benchmarks
 
 The manual voice-latency workflow had become its own bottleneck: each experiment
