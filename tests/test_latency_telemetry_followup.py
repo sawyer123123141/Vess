@@ -95,25 +95,23 @@ class LatencyTelemetryFollowupTests(unittest.TestCase):
         self.assertIsNone(initial.get("tts_worker_wait_ms"))
         self.assertIsNone(initial.get("tts_first_synthesis_ms"))
 
-        worker.handle_delivery(
-            "clause_synthesized",
+        worker.handle_synthesis_timing(
             {
                 "generation_id": first_generation,
                 "worker_wait_ms": 123.4,
                 "synthesis_ms": 456.7,
-            },
+            }
         )
         first = state.debug_snapshot()["values"]
         self.assertEqual(first["tts_worker_wait_ms"], 123.4)
         self.assertEqual(first["tts_first_synthesis_ms"], 456.7)
 
-        worker.handle_delivery(
-            "clause_synthesized",
+        worker.handle_synthesis_timing(
             {
                 "generation_id": first_generation,
                 "worker_wait_ms": 8.0,
                 "synthesis_ms": 9.0,
-            },
+            }
         )
         still_first = state.debug_snapshot()["values"]
         self.assertEqual(still_first["tts_worker_wait_ms"], 123.4)
@@ -125,13 +123,12 @@ class LatencyTelemetryFollowupTests(unittest.TestCase):
         self.assertIsNone(reset["tts_worker_wait_ms"])
         self.assertIsNone(reset["tts_first_synthesis_ms"])
 
-        worker.handle_delivery(
-            "clause_synthesized",
+        worker.handle_synthesis_timing(
             {
                 "generation_id": first_generation,
                 "worker_wait_ms": 999.0,
                 "synthesis_ms": 999.0,
-            },
+            }
         )
         after_stale = state.debug_snapshot()["values"]
         self.assertEqual(after_stale["latency_generation_id"], second_generation)
@@ -142,7 +139,7 @@ class LatencyTelemetryFollowupTests(unittest.TestCase):
         old_started = threading.Event()
         release_old = threading.Event()
         new_started = threading.Event()
-        deliveries: list[tuple[str, dict[str, object]]] = []
+        synthesis_timings: list[dict[str, object]] = []
 
         def synthesize(text: str) -> np.ndarray:
             if text == "old":
@@ -158,7 +155,7 @@ class LatencyTelemetryFollowupTests(unittest.TestCase):
             RecordingLog(),
             synthesize=synthesize,
             play=lambda audio, sample_rate: None,
-            on_delivery=lambda event, payload: deliveries.append((event, payload)),
+            on_synthesis_timing=synthesis_timings.append,
         )
         voice.start()
         voice.begin_generation(1)
@@ -174,8 +171,8 @@ class LatencyTelemetryFollowupTests(unittest.TestCase):
 
         new_synthesis = next(
             payload
-            for event, payload in deliveries
-            if event == "clause_synthesized" and payload.get("generation_id") == 2
+            for payload in synthesis_timings
+            if payload.get("generation_id") == 2
         )
         self.assertGreaterEqual(new_synthesis["worker_wait_ms"], 40.0)
         self.assertLess(new_synthesis["synthesis_ms"], new_synthesis["worker_wait_ms"])

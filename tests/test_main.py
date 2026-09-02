@@ -107,6 +107,17 @@ class MainTests(unittest.TestCase):
             [("clause_completed", {"generation_id": 3, "text": "done"})],
         )
 
+        synthesis_timing = {
+            "generation_id": 3,
+            "worker_wait_ms": 12.3,
+            "synthesis_ms": 45.6,
+        }
+        runtime.voice.on_synthesis_timing(synthesis_timing)
+        self.assertEqual(
+            runtime.conversation.synthesis_timings,
+            [synthesis_timing],
+        )
+
     def test_voice_runtime_shutdown_stops_audio_then_coordinator_before_conversation_and_voice(self) -> None:
         closed: list[str] = []
         FakeAudio.close_events = closed
@@ -175,9 +186,11 @@ class FakeVoice:
         *,
         player=None,
         on_delivery=None,
+        on_synthesis_timing=None,
     ) -> None:
         self.player = player
         self.on_delivery = on_delivery
+        self.on_synthesis_timing = on_synthesis_timing
 
     def close(self) -> None:
         if self.close_events is not None:
@@ -200,10 +213,14 @@ class FakeConversation:
     ) -> None:
         self.voice = voice
         self.deliveries: list[tuple[str, dict[str, object]]] = []
+        self.synthesis_timings: list[dict[str, object]] = []
         self.submitted: list[str] = []
 
     def handle_delivery(self, event_type: str, payload: dict[str, object]) -> None:
         self.deliveries.append((event_type, payload))
+
+    def handle_synthesis_timing(self, payload: dict[str, object]) -> None:
+        self.synthesis_timings.append(payload)
 
     def submit(self, text: str) -> None:
         self.submitted.append(text)
