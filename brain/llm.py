@@ -689,6 +689,9 @@ class ConversationWorker:
                 generation_id=generation_id,
                 **payload,
             )
+            self._delivery.llm_finished(generation_id)
+            self._voice.finish_generation(generation_id)
+            self._state.record_debug("llm_complete", generation_id=generation_id)
             return True
 
         self._event_log.append("command_executed", result.event_payload)
