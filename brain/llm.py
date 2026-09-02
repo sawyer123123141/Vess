@@ -12,7 +12,7 @@ from typing import Any
 from urllib import request as url_request
 
 from brain.delivery import DeliveryLedger
-from brain.memory import append_conversation_turn, recent_conversation_turns
+from brain.memory import FactCandidate, append_conversation_turn, recent_conversation_turns
 from performance import PerformanceCue, cue_for_label
 
 
@@ -246,6 +246,54 @@ class OllamaClient:
             raise RuntimeError(str(body["error"]))
         candidate = str(body.get("response", "")).strip().lower()
         return candidate if candidate in mood_names else None
+
+    def extract_facts(
+        self,
+        transcript: str,
+        known_keys: tuple[str, ...],
+        config: dict[str, Any],
+    ) -> list[FactCandidate]:
+        """Extract only explicit durable user facts into a narrow JSON contract."""
+        known = ", ".join(known_keys) if known_keys else "none"
+        prompt = (
+            "Extract durable facts from the user utterance below. Only include information "
+            "explicitly stated by the user; do not infer or use anything Vess may have said. "
+            "Return JSON only: a list of at most three objects with string fields "
+            '"key" and "value". Use an existing key when the utterance updates the same '
+            "topic; create a concise snake_case key only when necessary. Return [] when "
+            "there is no durable fact worth remembering. Do not store temporary moods or "
+            "one-off tasks, passwords, API tokens, credentials, or sensitive personal "
+            "information such as financial, medical, religious, political, sexual, racial, "
+            "or ethnic information.\n"
+            f"Known keys: {known}\n"
+            f"User utterance: {transcript}"
+        )
+        response = self._open(self._payload(prompt, config, stream=False))
+        try:
+            body = json.loads(response.read())
+        finally:
+            response.close()
+        if "error" in body:
+            raise RuntimeError(str(body["error"]))
+        try:
+            decoded = json.loads(str(body.get("response", "")))
+        except (json.JSONDecodeError, TypeError):
+            return []
+        if not isinstance(decoded, list):
+            return []
+
+        candidates: list[FactCandidate] = []
+        for item in decoded:
+            if not isinstance(item, dict):
+                continue
+            key = item.get("key")
+            value = item.get("value")
+            if not isinstance(key, str) or not isinstance(value, str):
+                continue
+            candidates.append(FactCandidate(key, value))
+            if len(candidates) >= 3:
+                break
+        return candidates
 
     def _payload(
         self,
