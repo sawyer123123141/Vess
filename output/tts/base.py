@@ -10,6 +10,10 @@ import numpy as np
 from performance import PerformanceCue
 
 
+class SynthesisCancelled(RuntimeError):
+    """Raised when an engine cooperatively abandons obsolete synthesis."""
+
+
 @dataclass(frozen=True)
 class SynthesisResult:
     """One synthesized mono waveform and its authoritative sample rate."""

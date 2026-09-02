@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
 
-from output.tts.base import SynthesisResult
+from output.tts.base import SynthesisCancelled, SynthesisResult
 from performance import PerformanceCue
 
 
@@ -40,7 +41,65 @@ class ChatterboxTurboEngine:
         performance: PerformanceCue,
     ) -> SynthesisResult:
         model = self._get_model()
-        waveform = model.generate(text)
+        return self._result(model, model.generate(text))
+
+    def synthesize_cancellable(
+        self,
+        text: str,
+        performance: PerformanceCue,
+        should_cancel: Callable[[], bool],
+    ) -> SynthesisResult:
+        """Abort obsolete Turbo work at safe Python boundaries inside generation."""
+        self._raise_if_cancelled(should_cancel)
+        model = self._get_model()
+        transformer = getattr(getattr(model, "t3", None), "tfmr", None)
+        hook_handle = None
+        restored_methods: list[tuple[object, str, object]] = []
+
+        if transformer is not None and hasattr(transformer, "register_forward_pre_hook"):
+            def cancel_before_transformer(_module: object, _inputs: object) -> None:
+                self._raise_if_cancelled(should_cancel)
+
+            hook_handle = transformer.register_forward_pre_hook(
+                cancel_before_transformer
+            )
+
+        s3gen = getattr(model, "s3gen", None)
+        if s3gen is not None:
+            for method_name in ("flow_inference", "hift_inference"):
+                original = getattr(s3gen, method_name, None)
+                if not callable(original):
+                    continue
+
+                def checked_stage(
+                    *args: object,
+                    _original: Callable[..., object] = original,
+                    **kwargs: object,
+                ) -> object:
+                    self._raise_if_cancelled(should_cancel)
+                    return _original(*args, **kwargs)
+
+                setattr(s3gen, method_name, checked_stage)
+                restored_methods.append((s3gen, method_name, original))
+
+        try:
+            waveform = model.generate(text)
+            self._raise_if_cancelled(should_cancel)
+        finally:
+            if hook_handle is not None:
+                hook_handle.remove()
+            for owner, method_name, original in restored_methods:
+                setattr(owner, method_name, original)
+
+        return self._result(model, waveform)
+
+    @staticmethod
+    def _raise_if_cancelled(should_cancel: Callable[[], bool]) -> None:
+        if should_cancel():
+            raise SynthesisCancelled("synthesis cancelled")
+
+    @staticmethod
+    def _result(model: Any, waveform: object) -> SynthesisResult:
         if hasattr(waveform, "detach"):
             waveform = waveform.detach().cpu().numpy()
         audio = np.asarray(waveform, dtype=np.float32).reshape(-1)

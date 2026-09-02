@@ -17,7 +17,7 @@ from output.audio_player import (
     PlaybackReceipt,
     SoundDeviceAudioPlayer,
 )
-from output.tts.base import SynthesisResult, TTSEngine
+from output.tts.base import SynthesisCancelled, SynthesisResult, TTSEngine
 from performance import PerformanceCue
 
 
@@ -375,7 +375,15 @@ class VoiceOutput:
         if queued_at is not None:
             worker_wait_ms = max(synthesis_started - queued_at, 0.0) * 1000.0
         try:
-            result = self._synthesize_text(text, cue)
+            result = self._synthesize_text(
+                text,
+                cue,
+                should_cancel=lambda: self._is_stale(generation_id),
+            )
+        except SynthesisCancelled:
+            self._ready_slots.release()
+            self._record_stale_skip(generation_id, stage="during_synthesis")
+            return
         except Exception as error:
             self._ready_slots.release()
             self._event_log.append("voice_error", {"error": str(error), "text": text})
@@ -716,6 +724,8 @@ class VoiceOutput:
         self,
         text: str,
         performance: PerformanceCue,
+        *,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> SynthesisResult:
         if self._engine is None and self._legacy_synthesize is None:
             from output.tts.factory import create_tts_engine
@@ -723,6 +733,9 @@ class VoiceOutput:
             self._engine = create_tts_engine(self._config)
 
         if self._engine is not None:
+            cancellable = getattr(self._engine, "synthesize_cancellable", None)
+            if should_cancel is not None and callable(cancellable):
+                return cancellable(text, performance, should_cancel)
             return self._engine.synthesize(text, performance)
 
         audio = np.asarray(self._legacy_synthesize(text), dtype=np.float32).reshape(-1)
