@@ -613,9 +613,9 @@ blocker for this image-based completion of step 2.
 
 `yolo11n.pt` (5,613,764 bytes) was downloaded from the Ultralytics GitHub
 release and loaded successfully with `ultralytics.YOLO`. It is located at
-`C:\\Users\\sawye\\Vess\\yolo11n.pt`; Ultralytics saved the relative model name in
+`C:\Users\sawye\Vess\yolo11n.pt`; Ultralytics saved the relative model name in
 the repository working directory, rather than in the previously expected
-`C:\\Users\\sawye\\weights` folder.
+`C:\Users\sawye\weights` folder.
 
 This completes only the model-download prerequisite. `Detector.detect()` has
 not been run against an image or camera yet.
@@ -720,9 +720,8 @@ physics; the multipliers are the character. A mood with no block moves exactly
 as neutral, so nothing that already existed had to change.
 
 Keys and limits: `hold` 0.25-3.0, `spread` 0.3-1.6, `ease` 0.3-3.0, `bob`
-0.0-2.0, `track_bias` 0.25-2.0, `gaze_lag` 0.0-1.0,
-`gaze_y_bias` -0.6-0.6, `track_break` 0.0-0.6. Multipliers default to 1.0,
-lags and biases to 0.0.
+0.0-2.0, `track_bias` 0.25-2.0, `gaze_lag` 0.0-1.0, `gaze_y_bias` -0.6-0.6,
+`track_break` 0.0-0.6. Multipliers default to 1.0, lags and biases to 0.0.
 
 ### Measured, 180s idle per mood
 
