@@ -146,7 +146,7 @@ class TriggerDeciderTests(unittest.TestCase):
         base = 10_000.0
         cases = (
             (snapshot(present=False), 12),
-            (snapshot(present=True, present_since=base, muted_until=base + 9999), 12),
+            (snapshot(present=True, present_since=base, muted_until=base + 99_999), 12),
             (snapshot(present=True, present_since=base, listening=True), 12),
             (snapshot(present=True, present_since=base, thinking=True), 12),
             (snapshot(present=True, present_since=base, speaking=True), 12),
