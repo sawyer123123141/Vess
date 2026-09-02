@@ -139,7 +139,8 @@ def _run_tts(args: argparse.Namespace) -> int:
         raise ValueError("runs must be at least 1")
     if not 0.0 <= args.intensity <= 1.0:
         raise ValueError("intensity must be between 0 and 1")
-    destination = artifact_path(ROOT / "artifacts", "tts", args.engine)
+    variant = f"{args.expression}-{float(args.intensity):.2f}"
+    destination = artifact_path(ROOT / "artifacts", "tts", args.engine, variant)
     cue = PerformanceCue(args.expression, float(args.intensity))
     return run_benchmark(
         args.engine,
