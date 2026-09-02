@@ -11,6 +11,9 @@ from output.tts.base import SynthesisCancelled, SynthesisResult
 from performance import PerformanceCue
 
 
+_PLAYFUL_CHUCKLE_MIN_INTENSITY = 0.60
+
+
 class ChatterboxTurboEngine:
     """Load Chatterbox Turbo only when synthesis is first requested."""
 
@@ -41,7 +44,8 @@ class ChatterboxTurboEngine:
         performance: PerformanceCue,
     ) -> SynthesisResult:
         model = self._get_model()
-        return self._result(model, model.generate(text))
+        prepared = self._prepare_text(text, performance)
+        return self._result(model, model.generate(prepared))
 
     def synthesize_cancellable(
         self,
@@ -83,7 +87,8 @@ class ChatterboxTurboEngine:
                 restored_methods.append((s3gen, method_name, original))
 
         try:
-            waveform = model.generate(text)
+            prepared = self._prepare_text(text, performance)
+            waveform = model.generate(prepared)
             self._raise_if_cancelled(should_cancel)
         finally:
             if hook_handle is not None:
@@ -92,6 +97,17 @@ class ChatterboxTurboEngine:
                 setattr(owner, method_name, original)
 
         return self._result(model, waveform)
+
+    @staticmethod
+    def _prepare_text(text: str, performance: PerformanceCue) -> str:
+        """Apply only expressive tokens that are safe enough for live speech."""
+        if (
+            text
+            and performance.expression == "playful"
+            and performance.intensity >= _PLAYFUL_CHUCKLE_MIN_INTENSITY
+        ):
+            return f"{text} [chuckle]"
+        return text
 
     @staticmethod
     def _raise_if_cancelled(should_cancel: Callable[[], bool]) -> None:
