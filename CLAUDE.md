@@ -35,20 +35,60 @@ In order:
 Never paper over confusion by writing something plausible. If two parts of the
 plan seem to contradict each other, say so.
 
-## Hardware facts (already tested — don't re-benchmark)
+## Hardware facts (measured — evidence, not a placement prescription)
 
 Target machine: Ryzen 5800X, RTX 3070 8GB, 16GB DDR4, Windows.
 
-- `qwen2.5:7b` via Ollama: 100% GPU, 4.7GB VRAM, 4096 context, fast when warm
-- `faster-whisper` small int8 on **CPU**: ~2.3x realtime
-- Kokoro TTS on **CPU**: ~0.5s for a short sentence when warm
-- Vision model: near-instant
+Historical baseline:
 
-VRAM is the hard constraint. ~8GB total, ~1GB to Windows. Do not raise context
-above 4096 or load a second GPU model without asking — overflow drops
-throughput ~30x with no graceful degradation.
+- `qwen2.5:7b` via Ollama: 100% GPU, about 4.7GB VRAM, 4096 context, fast when
+  warm.
+- `faster-whisper` small int8 on CPU: about 2.3x realtime.
+- Kokoro TTS on CPU: about 0.5s for a short sentence when warm.
+- Vision model: near-instant in the earlier test path.
 
-Whisper and Kokoro stay on CPU. That's deliberate, not an oversight.
+September 2, 2026 voice-runtime measurements supersede the old assumption that
+Whisper must stay on CPU and that Kokoro is necessarily the final voice:
+
+- Whisper small on CUDA with `int8_float16` and beam size 5 is accurate on the
+  tested owner phrase. Beam size 1 caused severe transcription errors. Warm
+  integrated transcriptions measured from about 134ms to 1078ms on short
+  utterances; one cold integrated load took 31.6s.
+- Chatterbox Turbo 0.1.7 works on the RTX 3070 with
+  `torch/torchaudio 2.6.0+cu124`, `torchvision 0.21.0+cu124`, and NumPy 1.26.4.
+  Standalone warm neutral synthesis measured roughly 0.5-0.95s across the
+  standard short-to-skeptical corpus. A playful `[chuckle]` pass measured
+  roughly 0.76-1.28s warm.
+- `resemble-perth` currently relies on deprecated `pkg_resources`. On this
+  machine, setuptools 84 caused `PerthImplicitWatermarker` to become `None`
+  and Chatterbox failed at startup. `setuptools==80.9.0` is known-good; keep
+  setuptools below 81 until Perth removes that dependency.
+- In the full Vess process with Ollama/Qwen, CUDA Whisper, Chatterbox Turbo,
+  Perth, and the Windows desktop resident, `nvidia-smi` showed
+  **7854MiB / 8192MiB VRAM used** at only 3% GPU utilization. VRAM capacity,
+  not raw compute saturation, is the current hardware constraint.
+- The first integrated Chatterbox interaction exposed a cold-start queue stall:
+  `tts_worker_wait_ms=52515.1`, first-clause synthesis 3935.5ms, and
+  speech-end-to-playback 57661.6ms. The stale acknowledgement `"Yeah?"` held
+  the single synthesis worker while Chatterbox cold-loaded, then was correctly
+  discarded as stale.
+- Without restarting, the next interaction had essentially no TTS worker wait
+  (0.1ms). It measured speech-to-transcript 1553.2ms, LLM first clause
+  1360.6ms, first playful TTS synthesis 2477.9ms, and
+  speech-end-to-playback 5392.6ms. The second neutral clause synthesized in
+  1665.9ms with a 0.2ms playback gap.
+
+**No final model-placement policy is chosen yet.** Do not assume that moving
+Whisper to CPU, shrinking Whisper, unloading/reloading models, changing the
+LLM, or keeping every model resident is automatically correct. The next voice
+performance planning pass should compare alternatives against measured
+end-to-end latency, recognition quality, VRAM headroom, startup behavior, and
+steady-state responsiveness. Avoid an architecture that fixes VRAM by adding
+large reload stalls.
+
+The main branch config may remain conservative while hardware experiments are
+performed locally. Record experiment settings and results in `STATUS.md`
+before turning them into defaults.
 
 ## Code style
 
